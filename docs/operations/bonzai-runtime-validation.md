@@ -56,20 +56,22 @@ pnpm --filter t3 run probe:bonzai-runtime -- \
 
 The output file must not already exist. The probe creates its directory and file with private permissions, writes only after schema validation and a secret-sentinel leak scan, then removes its isolated Claude transcript and config state.
 
+A relative `--output` is resolved against the **workspace root**, not the current directory. `pnpm --filter t3 run` executes with the working directory set to `apps/server`, so a cwd-relative path would otherwise write evidence outside the ignored directory. Pass an absolute path if you want it somewhere else deliberately.
+
 ## Experiment sequence
 
 The baseline always runs in this order:
 
-| ID  | Credential state                   | Purpose and gate                                                                                       |
-| --- | ---------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| E0  | No credential in isolated state    | Detect an unexpected saved login or other credential source. Any success makes the decision ambiguous. |
-| E1  | Token absent                       | Record the missing-token SDK result and/or stream exception.                                           |
-| E2  | Token and API key explicitly empty | Confirm inherited Anthropic credentials cannot fill the gap.                                           |
-| E3  | Unique synthetic invalid token     | Record the invalid-token Bonzai and SDK termination shape.                                             |
-| E4  | K1                                 | Create a short session and receive a nonsecret random marker plus durable session ID.                  |
-| E5  | K1                                 | Resume E4 with identical `cwd` and config state. E5 must return the same session ID and marker.        |
-| E6  | K2                                 | Resume the exact E4 session only after E5 passes.                                                      |
-| E7  | Separately scoped key              | Optional and separately authorized; excluded by default.                                               |
+| ID  | Credential state                   | Purpose and gate                                                                                                                                                                                        |
+| --- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| E0  | No credential in isolated state    | Detect an unexpected saved login or other credential source. Any success makes the decision ambiguous. Deliberately identical to E1: E0 is the contamination gate, E1 the recorded missing-token shape. |
+| E1  | Token absent                       | Record the missing-token SDK result and/or stream exception.                                                                                                                                            |
+| E2  | Token and API key explicitly empty | Confirm inherited Anthropic credentials cannot fill the gap.                                                                                                                                            |
+| E3  | Unique synthetic invalid token     | Record the invalid-token Bonzai and SDK termination shape.                                                                                                                                              |
+| E4  | K1                                 | Create a short session and receive a nonsecret random marker plus durable session ID.                                                                                                                   |
+| E5  | K1                                 | Resume E4 with identical `cwd` and config state. E5 must return the same session ID and marker.                                                                                                         |
+| E6  | K2                                 | Resume the exact E4 session only after E5 passes.                                                                                                                                                       |
+| E7  | Separately scoped key              | Optional and separately authorized; excluded by default.                                                                                                                                                |
 
 Each row uses a fresh SDK query, the same benign fixed prompt class, no tools, no settings sources, no MCP servers, one turn, a low budget, and a hard timeout. E4–E7 share one temporary `cwd` and `CLAUDE_CONFIG_DIR` so transcript lookup is controlled.
 

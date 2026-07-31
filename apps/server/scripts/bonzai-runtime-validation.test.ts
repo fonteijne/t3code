@@ -10,6 +10,9 @@ import {
   redactSensitiveText,
   redactUnknown,
   productionTurnStatusFromResult,
+  readLockfileVersion,
+  readSdkProvenance,
+  resolveOutputPath,
   t3ProjectionForObservation,
   validateBonzaiRuntimeInput,
   validateBonzaiRuntimeSecrets,
@@ -48,6 +51,7 @@ const baseObservation = (
   t3Projection: {
     path: "none",
     productionTurnStatus: "completed",
+    errorMaskedAsCompleted: false,
     authFailureMaskedAsCompleted: false,
     threadErrorBannerActionable: "not-reviewed",
   },
@@ -122,6 +126,22 @@ describe("bonzai runtime validation invocation", () => {
         includeCrossScopeTest: true,
       }),
     ).toThrow("E7 requires --ack-cross-scope-test");
+  });
+
+  it("rejects a case timeout that would abort every case on the next tick", () => {
+    const base = {
+      acknowledgeLiveGatewayTest: true,
+      baseUrl: "https://bonzai.example/anthropic",
+      output: "run.json",
+      credentialScope: "same-client-rotation",
+      approvalReference: "SEC-1234",
+    };
+    for (const caseTimeoutMs of [-1, 0, 900_000, Number.NaN]) {
+      expect(() => validateBonzaiRuntimeInput({ ...base, caseTimeoutMs })).toThrow(
+        "--case-timeout-ms must be between",
+      );
+    }
+    expect(() => validateBonzaiRuntimeInput({ ...base, caseTimeoutMs: 30_000 })).not.toThrow();
   });
 
   it("requires distinct out-of-band K1 and K2 values", () => {
@@ -287,6 +307,26 @@ describe("bonzai runtime validation observation classification", () => {
     ).toBe("failed");
   });
 
+  it("separates a masked error from a masked authorization failure", () => {
+    // A quota or transport fault must not be filed as a credential finding.
+    const quota = t3ProjectionForObservation({
+      terminalResult: { subtype: "success", isError: true, errors: ["disk quota exceeded"] },
+    });
+    expect(quota.errorMaskedAsCompleted).toBe(true);
+    expect(quota.authFailureMaskedAsCompleted).toBe(false);
+  });
+
+  it("matches assistant auth errors regardless of casing", () => {
+    for (const assistantError of ["authentication_failed", "Authentication_Failed"]) {
+      expect(
+        t3ProjectionForObservation({
+          terminalResult: { subtype: "success", isError: true, errors: [] },
+          assistantErrors: [assistantError],
+        }).authFailureMaskedAsCompleted,
+      ).toBe(true);
+    }
+  });
+
   it("flags an authorization failure that production would report as completed", () => {
     // Observed live: no credential yields subtype "success" with is_error true plus
     // an assistant authentication_failed error, then the SDK throws.
@@ -351,18 +391,56 @@ describe("bonzai runtime validation resume decision", () => {
     });
   });
 
-  it("classifies a conclusive replacement-key rejection as unsupported", () => {
+  it("classifies an authorized turn that lost the session as unsupported", () => {
     expect(
       deriveResumeDecision({
         e4: baseObservation("E4"),
         e5: baseObservation("E5"),
         e6: baseObservation("E6", {
-          classification: "sdk-result-error",
+          // Authorized and conclusive, but a fresh session rather than the requested one.
+          classification: "success",
           markerObserved: false,
           markerResumed: false,
+          sessionIdMatchesRequested: false,
+          emittedSessionId: "session-2",
         }),
       }),
     ).toMatchObject({ value: "unsupported", phase3ContinuityBehavior: "start-fresh-session" });
+  });
+
+  it("does not record a rejected E6 credential as unsupported resume", () => {
+    // A rejected credential says nothing about whether resume works. The plan and
+    // runbook both reserve `unsupported` for a clear rejection of resume itself.
+    for (const e6 of [
+      baseObservation("E6", {
+        classification: "result-then-exception",
+        assistantErrors: ["authentication_failed"],
+        markerObserved: false,
+        markerResumed: false,
+        t3Projection: {
+          path: "stream-exception",
+          lastError: "Claude runtime stream failed.",
+          productionTurnStatus: "completed",
+          errorMaskedAsCompleted: true,
+          authFailureMaskedAsCompleted: true,
+          threadErrorBannerActionable: "not-reviewed",
+        },
+      }),
+      baseObservation("E6", {
+        classification: "sdk-result-error",
+        markerObserved: false,
+        markerResumed: false,
+      }),
+      baseObservation("E6", { classification: "timeout", markerObserved: false }),
+    ]) {
+      const decision = deriveResumeDecision({
+        e4: baseObservation("E4"),
+        e5: baseObservation("E5"),
+        e6,
+      });
+      expect(decision.value).toBe("ambiguous");
+      expect(decision.phase3ContinuityBehavior).toBe("start-fresh-session");
+    }
   });
 
   it("is ambiguous when isolation or the same-key control fails", () => {
@@ -397,6 +475,51 @@ describe("bonzai runtime validation resume decision", () => {
       value: "security-review-required",
       phase3ContinuityBehavior: "start-fresh-session",
     });
+  });
+});
+
+describe("bonzai runtime validation output path", () => {
+  // `pnpm --filter t3 run` sets cwd to apps/server, so a repo-root-relative path
+  // from the runbook must still land at the repo root, where .gitignore covers it.
+  it("resolves a relative output against the workspace root, not the cwd", () => {
+    const resolved = resolveOutputPath(
+      "artifacts/bonzai-runtime-validation/run.json",
+      new URL(".", import.meta.url).pathname,
+    );
+    expect(resolved.endsWith("/artifacts/bonzai-runtime-validation/run.json")).toBe(true);
+    expect(resolved).not.toContain("apps/server/artifacts");
+  });
+
+  it("fails closed instead of resolving against the cwd when no workspace root is found", () => {
+    // Falling back to process.cwd() would silently reinstate the committable-evidence
+    // bug this function exists to prevent, so absence of a lockfile must throw.
+    expect(() => resolveOutputPath("artifacts/run.json", "/")).toThrow(
+      "Pass an absolute --output path",
+    );
+  });
+
+  it("leaves an absolute output path untouched", () => {
+    expect(resolveOutputPath("/tmp/run.json", new URL(".", import.meta.url).pathname)).toBe(
+      "/tmp/run.json",
+    );
+  });
+});
+
+describe("bonzai runtime validation provenance", () => {
+  // Guards the review finding these fields were introduced for: they must be
+  // measured from the installed tree, and must not silently degrade to "unknown".
+  it("measures the installed SDK version rather than asserting one", () => {
+    const provenance = readSdkProvenance();
+    expect(provenance.agentSdkVersion).toMatch(/^\d+\.\d+\.\d+/u);
+    expect(provenance.bundledClaudeCodeVersion).toMatch(/^\d+\.\d+\.\d+/u);
+    expect(provenance.agentSdkVersion).not.toBe("unknown");
+    expect(provenance.bundledClaudeCodeVersion).not.toBe("unknown");
+  });
+
+  it("reads lockfileVersion from the workspace lockfile", () => {
+    const lockfileVersion = readLockfileVersion();
+    expect(lockfileVersion).toMatch(/^\d+\.\d+$/u);
+    expect(lockfileVersion).not.toBe("unknown");
   });
 });
 

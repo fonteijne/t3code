@@ -7,6 +7,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeProcess from "node:process";
 import * as NodeTimers from "node:timers";
+import * as NodeURL from "node:url";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
@@ -22,10 +23,25 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { Command, Flag } from "effect/unstable/cli";
 
-const SDK_VERSION = "0.3.170";
-const CLAUDE_CODE_VERSION = "2.1.170";
 const REPORT_SCHEMA_VERSION = "1";
 const DEFAULT_CASE_TIMEOUT_MS = 30_000;
+const MIN_CASE_TIMEOUT_MS = 1_000;
+const MAX_CASE_TIMEOUT_MS = 600_000;
+/** One user turn per case: enough to store or recall the marker, never a tool loop. */
+const CASE_MAX_TURNS = 1;
+/** Hard per-case spend ceiling so a retry storm cannot run up cost. */
+const CASE_MAX_BUDGET_USD = 0.05;
+/** Value recorded when provenance cannot be measured; never a plausible-looking guess. */
+const UNKNOWN_PROVENANCE = "unknown";
+/** Classifications that prove nothing about resume support, only that no clear answer arrived. */
+const INCONCLUSIVE_E6_CLASSIFICATIONS: ReadonlySet<ResultClassification> = new Set([
+  "stream-exception",
+  "no-terminal-result",
+  "timeout",
+  "skipped",
+  "sdk-result-error",
+  "result-then-exception",
+]);
 const INVALID_TOKEN_PREFIX = "bonzai-invalid-synthetic";
 const SECRET_REPLACEMENT = "[REDACTED_CREDENTIAL]";
 const PATH_REPLACEMENT = "[REDACTED_PATH]";
@@ -148,8 +164,15 @@ const T3Projection = Schema.Struct({
    */
   productionTurnStatus: ProductionTurnStatus,
   /**
-   * True when the gateway/CLI signalled an authorization failure that production
-   * would nonetheless project as a completed turn, hiding the actionable text.
+   * True when the result carried `is_error` but production would still project a
+   * completed turn, hiding the failure. Cause-agnostic: covers quota, transport,
+   * and authorization alike.
+   */
+  errorMaskedAsCompleted: Schema.Boolean,
+  /**
+   * Narrower than `errorMaskedAsCompleted`: set only when an assistant message
+   * named an authorization failure, so an operator can trust this as a credential
+   * finding rather than any masked error.
    */
   authFailureMaskedAsCompleted: Schema.Boolean,
   threadErrorBannerActionable: Schema.Literals(["not-reviewed", "yes", "no"]),
@@ -424,6 +447,18 @@ export function validateBonzaiRuntimeInput(
   if (input.approvalReference.trim().length === 0) {
     throw new BonzaiRuntimeValidationInputError({ message: "--approval-reference is required." });
   }
+  if (
+    input.caseTimeoutMs !== undefined &&
+    (!Number.isFinite(input.caseTimeoutMs) ||
+      input.caseTimeoutMs < MIN_CASE_TIMEOUT_MS ||
+      input.caseTimeoutMs > MAX_CASE_TIMEOUT_MS)
+  ) {
+    // A non-positive delay fires on the next tick, aborting every case and
+    // producing a report full of timeouts that reads like a gateway outage.
+    throw new BonzaiRuntimeValidationInputError({
+      message: `--case-timeout-ms must be between ${MIN_CASE_TIMEOUT_MS} and ${MAX_CASE_TIMEOUT_MS}.`,
+    });
+  }
 
   let gatewayUrl: URL;
   try {
@@ -478,8 +513,15 @@ export function validateBonzaiRuntimeSecrets(
 }
 
 /**
- * Mirror of `ClaudeAdapter.turnStatusFromResult`. It keys only on `subtype`, so a
- * result with `subtype: "success"` is "completed" even when `is_error` is true.
+ * Mirror of `ClaudeAdapter.turnStatusFromResult` (`ClaudeAdapter.ts:997`) and its
+ * `isInterruptedResult`/`resultErrorsText` helpers (`:300-319`). It keys only on
+ * `subtype`, so a result with `subtype: "success"` is "completed" even when
+ * `is_error` is true — that gap is the finding this harness recorded.
+ *
+ * Those helpers are module-private, so this is a copy rather than a call, and
+ * nothing pins the two together. If production changes, update this and the tests
+ * below that enumerate its behavior. Fixing the `is_error` gap in production will
+ * invalidate this mirror by design.
  */
 export function productionTurnStatusFromResult(result: {
   readonly subtype: string;
@@ -519,11 +561,20 @@ export function t3ProjectionForObservation(input: {
   // Production only emits a runtime error from the result path when the derived
   // status is "failed"; anything else leaves `lastError` to the stream-exit path.
   const resultPathEmitsError = productionTurnStatus === "failed";
-  const authSignalled =
-    input.terminalResult?.isError === true ||
-    (input.assistantErrors ?? []).some((error) => error.includes("auth"));
+  // Any `is_error` result proves production would mask *some* failure as completed;
+  // only an assistant auth error proves the cause was authorization. Keeping these
+  // separate stops a quota or transport fault being misfiled as an auth finding.
+  const errorMaskedAsCompleted =
+    input.terminalResult?.isError === true && productionTurnStatus === "completed";
+  const authSignalled = (input.assistantErrors ?? []).some((error) =>
+    error.toLowerCase().includes("auth"),
+  );
   const authFailureMaskedAsCompleted = authSignalled && productionTurnStatus === "completed";
-  const base = { productionTurnStatus, authFailureMaskedAsCompleted } as const;
+  const base = {
+    productionTurnStatus,
+    errorMaskedAsCompleted,
+    authFailureMaskedAsCompleted,
+  } as const;
 
   if (resultPathEmitsError && input.caughtException) {
     return {
@@ -600,15 +651,21 @@ export function deriveResumeDecision(input: ResumeDecisionInput): typeof ResumeD
       phase3ContinuityBehavior: "start-fresh-session",
     };
   }
+  // `unsupported` is reserved for a *clear* rejection of replacement-key resume.
+  // Anything that only proves "the request never got a conclusive gateway answer"
+  // is ambiguous, per the plan's decision rule and the operator runbook. A masked
+  // authorization failure or a server-side result error says nothing about whether
+  // resume itself is supported, so it must not be recorded as unsupported.
   if (
     !input.e6 ||
-    ["stream-exception", "no-terminal-result", "timeout", "skipped"].includes(
-      input.e6.classification,
-    )
+    INCONCLUSIVE_E6_CLASSIFICATIONS.has(input.e6.classification) ||
+    input.e6.t3Projection.authFailureMaskedAsCompleted ||
+    input.e6.assistantErrors.some((error) => error.toLowerCase().includes("auth"))
   ) {
     return {
       value: "ambiguous",
-      rationale: "E6 did not produce a conclusive gateway result after the controls passed.",
+      rationale:
+        "E6 did not produce a conclusive gateway result after the controls passed: the credential was rejected, the stream failed, or no terminal result arrived. This says nothing about whether replacement-key resume is supported.",
       phase3ContinuityBehavior: "start-fresh-session",
     };
   }
@@ -622,7 +679,8 @@ export function deriveResumeDecision(input: ResumeDecisionInput): typeof ResumeD
   }
   return {
     value: "unsupported",
-    rationale: "E6 returned a conclusive result without preserving the E4 session and marker.",
+    rationale:
+      "E6 was authorized and returned a conclusive turn, but did not preserve the E4 session ID and marker. Replacement-key resume is therefore not supported for this scope.",
     phase3ContinuityBehavior: "start-fresh-session",
   };
 }
@@ -630,6 +688,9 @@ export function deriveResumeDecision(input: ResumeDecisionInput): typeof ResumeD
 function purposeForExperiment(id: ExperimentId): string {
   switch (id) {
     case "E0":
+      // Deliberately identical to E1. E0 is the contamination gate whose success
+      // forces an ambiguous decision; E1 is the recorded missing-token shape. Kept
+      // separate so a contaminated environment cannot be mistaken for evidence.
       return "Detect saved-login or credential contamination in isolated state.";
     case "E1":
       return "Record missing-token SDK termination behavior.";
@@ -664,6 +725,8 @@ function summarizeSdkMessage(
   message: SDKMessage,
   sequence: number,
   marker: string | undefined,
+  secrets: readonly string[],
+  sensitivePaths: readonly string[],
 ): typeof SdkMessageSummary.Type {
   const subtype =
     "subtype" in message && typeof message.subtype === "string" ? message.subtype : undefined;
@@ -671,7 +734,12 @@ function summarizeSdkMessage(
     message.type === "system" && message.subtype === "init"
       ? String(message.apiKeySource)
       : undefined;
-  const assistantError = message.type === "assistant" ? message.error : undefined;
+  // SDK error strings can embed gateway prose and absolute paths, so this field is
+  // redacted like every other free-text value that reaches the report.
+  const assistantError =
+    message.type === "assistant" && message.error !== undefined
+      ? redactSensitiveText(message.error, secrets, sensitivePaths)
+      : undefined;
   const assistantContainsMarker =
     message.type === "assistant" && marker !== undefined
       ? sdkMessageText(message).includes(marker)
@@ -727,6 +795,9 @@ interface RunExperimentInput {
   readonly baseUrl: string;
   readonly cwd: string;
   readonly configDir: string;
+  /** E4's paths. Every resume case must run in the same ones or its result is meaningless. */
+  readonly controlCwd: string;
+  readonly controlConfigDir: string;
   readonly marker?: string | undefined;
   readonly resume?: string | undefined;
   readonly prompt: string;
@@ -765,8 +836,8 @@ async function runExperiment(input: RunExperimentInput): Promise<BonzaiRuntimeOb
         settingSources: [],
         tools: [],
         mcpServers: {},
-        maxTurns: 1,
-        maxBudgetUsd: 0.05,
+        maxTurns: CASE_MAX_TURNS,
+        maxBudgetUsd: CASE_MAX_BUDGET_USD,
         abortController,
         ...(input.model ? { model: input.model } : {}),
         persistSession: true,
@@ -776,7 +847,9 @@ async function runExperiment(input: RunExperimentInput): Promise<BonzaiRuntimeOb
     });
 
     for await (const message of queryRuntime) {
-      messages.push(summarizeSdkMessage(message, messages.length, input.marker));
+      messages.push(
+        summarizeSdkMessage(message, messages.length, input.marker, input.secrets, sensitivePaths),
+      );
       if (message.type === "result") {
         terminalResult = normalizeTerminalResult(
           message,
@@ -828,8 +901,12 @@ async function runExperiment(input: RunExperimentInput): Promise<BonzaiRuntimeOb
     credentialPresence: environmentPresence(environment),
     cwdLabel: "isolated-cwd",
     configDirLabel: "isolated-claude-config",
-    cwdMatchesControl: true,
-    configDirMatchesControl: true,
+    // Compared as resolved real paths, not as the strings passed in. A same-string
+    // comparison could not fail; this can, if a case ever runs against a different
+    // directory, a moved temp root, or a symlink that resolves elsewhere — which is
+    // exactly the condition that would invalidate E5/E6 transcript continuity.
+    cwdMatchesControl: realPathsMatch(input.cwd, input.controlCwd),
+    configDirMatchesControl: realPathsMatch(input.configDir, input.controlConfigDir),
     messages,
     apiRetryCount,
     assistantErrors,
@@ -888,12 +965,23 @@ function skippedObservation(input: {
     t3Projection: {
       path: "none",
       productionTurnStatus: "none",
+      errorMaskedAsCompleted: false,
       authFailureMaskedAsCompleted: false,
       threadErrorBannerActionable: "not-reviewed",
     },
     timeoutMs: DEFAULT_CASE_TIMEOUT_MS,
     skippedReason: input.reason,
   };
+}
+
+/** Removes the isolated state and reports whether it actually went away. */
+function removeTemporaryState(tempRoot: string): boolean {
+  try {
+    NodeFS.rmSync(tempRoot, { recursive: true, force: true });
+    return !NodeFS.existsSync(tempRoot);
+  } catch {
+    return false;
+  }
 }
 
 function observationById(
@@ -904,7 +992,108 @@ function observationById(
 }
 
 function readPnpmVersion(): string {
-  return NodeProcess.env.npm_config_user_agent?.match(/pnpm\/([^\s]+)/u)?.[1] ?? "11.10.0";
+  return NodeProcess.env.npm_config_user_agent?.match(/pnpm\/([^\s]+)/u)?.[1] ?? UNKNOWN_PROVENANCE;
+}
+
+/**
+ * True when both paths resolve to the same real location. Resolution failure counts
+ * as a mismatch: an unreadable transcript directory invalidates resume continuity
+ * just as surely as a different one.
+ */
+function realPathsMatch(left: string, right: string): boolean {
+  try {
+    return NodeFS.realpathSync(left) === NodeFS.realpathSync(right);
+  } catch {
+    return false;
+  }
+}
+
+/** Walks up from `startDirectory` looking for `fileName`, bounded by `maxDepth`. */
+function findNearestFile(
+  startDirectory: string,
+  fileName: string,
+  maxDepth: number,
+): string | undefined {
+  let directory = startDirectory;
+  for (let depth = 0; depth < maxDepth; depth += 1) {
+    const candidate = NodePath.join(directory, fileName);
+    if (NodeFS.existsSync(candidate)) return candidate;
+    const parent = NodePath.dirname(directory);
+    if (parent === directory) break;
+    directory = parent;
+  }
+  return undefined;
+}
+
+/**
+ * Provenance is measured from the installed tree, never asserted. `package.json`
+ * pins a caret range, so a routine update would otherwise leave the report
+ * claiming a version it did not exercise.
+ */
+export function readSdkProvenance(): {
+  readonly agentSdkVersion: string;
+  readonly bundledClaudeCodeVersion: string;
+} {
+  try {
+    // The SDK's `exports` map does not expose `./package.json`, so resolve its entry
+    // point instead and walk up to the manifest shipped alongside it.
+    const entryPath = NodeURL.fileURLToPath(import.meta.resolve("@anthropic-ai/claude-agent-sdk"));
+    const manifestPath = findNearestFile(NodePath.dirname(entryPath), "package.json", 4);
+    if (manifestPath === undefined) {
+      return {
+        agentSdkVersion: UNKNOWN_PROVENANCE,
+        bundledClaudeCodeVersion: UNKNOWN_PROVENANCE,
+      };
+    }
+    const manifest = JSON.parse(NodeFS.readFileSync(manifestPath, "utf8")) as {
+      readonly version?: unknown;
+      readonly claudeCodeVersion?: unknown;
+    };
+    return {
+      agentSdkVersion: typeof manifest.version === "string" ? manifest.version : UNKNOWN_PROVENANCE,
+      bundledClaudeCodeVersion:
+        typeof manifest.claudeCodeVersion === "string"
+          ? manifest.claudeCodeVersion
+          : UNKNOWN_PROVENANCE,
+    };
+  } catch {
+    return {
+      agentSdkVersion: UNKNOWN_PROVENANCE,
+      bundledClaudeCodeVersion: UNKNOWN_PROVENANCE,
+    };
+  }
+}
+
+/**
+ * Resolves `--output` against the workspace root rather than `process.cwd()`.
+ * `pnpm --filter t3 run` executes with cwd set to `apps/server`, so the runbook's
+ * repo-root-relative path would otherwise land in a directory the root `.gitignore`
+ * does not cover — writing evidence somewhere it could be committed.
+ */
+export function resolveOutputPath(output: string, scriptDirectory: string): string {
+  if (NodePath.isAbsolute(output)) return output;
+  const lockfile = findNearestFile(scriptDirectory, "pnpm-lock.yaml", 6);
+  if (lockfile === undefined) {
+    // Falling back to process.cwd() here would silently reinstate the exact bug this
+    // function exists to prevent: evidence written outside the ignored directory.
+    throw new BonzaiRuntimeValidationInputError({
+      message:
+        "Could not locate the workspace root to resolve --output. Pass an absolute --output path.",
+    });
+  }
+  return NodePath.resolve(NodePath.dirname(lockfile), output);
+}
+
+/** Reads `lockfileVersion` from the workspace lockfile, walking up from this script. */
+export function readLockfileVersion(): string {
+  const lockfile = findNearestFile(
+    NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)),
+    "pnpm-lock.yaml",
+    6,
+  );
+  if (lockfile === undefined) return UNKNOWN_PROVENANCE;
+  const match = NodeFS.readFileSync(lockfile, "utf8").match(/^lockfileVersion:\s*'?([^'\s]+)'?/mu);
+  return match?.[1] ?? UNKNOWN_PROVENANCE;
 }
 
 export async function encodeAndValidateBonzaiRuntimeReport(
@@ -946,6 +1135,7 @@ export const runBonzaiRuntimeValidation = Effect.fn("runBonzaiRuntimeValidation"
   const k2 = secretEnvironment.BONZAI_RUNTIME_K2 as string;
   const crossScopeKey = secretEnvironment.BONZAI_RUNTIME_CROSS_SCOPE_KEY;
   const caseTimeoutMs = rawInput.caseTimeoutMs ?? DEFAULT_CASE_TIMEOUT_MS;
+  const sdkProvenance = readSdkProvenance();
   const invalidToken = `${INVALID_TOKEN_PREFIX}-${NodeCrypto.randomUUID()}`;
   const marker = `BONZAI_RUNTIME_MARKER_${NodeCrypto.randomUUID()}`;
   const secretSentinels = [k1, k2, invalidToken, ...(crossScopeKey ? [crossScopeKey] : [])];
@@ -980,6 +1170,8 @@ export const runBonzaiRuntimeValidation = Effect.fn("runBonzaiRuntimeValidation"
             baseUrl: input.baseUrl,
             cwd,
             configDir,
+            controlCwd: cwd,
+            controlConfigDir: configDir,
             prompt: fixedAuthPrompt,
             model: input.model,
             secrets: secretSentinels,
@@ -994,6 +1186,8 @@ export const runBonzaiRuntimeValidation = Effect.fn("runBonzaiRuntimeValidation"
             baseUrl: input.baseUrl,
             cwd,
             configDir,
+            controlCwd: cwd,
+            controlConfigDir: configDir,
             prompt: fixedAuthPrompt,
             model: input.model,
             secrets: secretSentinels,
@@ -1008,6 +1202,8 @@ export const runBonzaiRuntimeValidation = Effect.fn("runBonzaiRuntimeValidation"
             baseUrl: input.baseUrl,
             cwd,
             configDir,
+            controlCwd: cwd,
+            controlConfigDir: configDir,
             prompt: fixedAuthPrompt,
             model: input.model,
             secrets: secretSentinels,
@@ -1023,6 +1219,8 @@ export const runBonzaiRuntimeValidation = Effect.fn("runBonzaiRuntimeValidation"
             baseUrl: input.baseUrl,
             cwd,
             configDir,
+            controlCwd: cwd,
+            controlConfigDir: configDir,
             prompt: fixedAuthPrompt,
             model: input.model,
             secrets: secretSentinels,
@@ -1038,6 +1236,8 @@ export const runBonzaiRuntimeValidation = Effect.fn("runBonzaiRuntimeValidation"
           baseUrl: input.baseUrl,
           cwd,
           configDir,
+          controlCwd: cwd,
+          controlConfigDir: configDir,
           marker,
           prompt: `Remember this nonsecret validation marker and reply with it exactly: ${marker}`,
           model: input.model,
@@ -1057,6 +1257,8 @@ export const runBonzaiRuntimeValidation = Effect.fn("runBonzaiRuntimeValidation"
               baseUrl: input.baseUrl,
               cwd,
               configDir,
+              controlCwd: cwd,
+              controlConfigDir: configDir,
               marker,
               resume: e4.emittedSessionId,
               prompt: "Reply with the exact nonsecret validation marker from the preceding turn.",
@@ -1082,6 +1284,8 @@ export const runBonzaiRuntimeValidation = Effect.fn("runBonzaiRuntimeValidation"
               baseUrl: input.baseUrl,
               cwd,
               configDir,
+              controlCwd: cwd,
+              controlConfigDir: configDir,
               marker,
               resume: e4.emittedSessionId,
               prompt: "Reply with the exact nonsecret validation marker from the original turn.",
@@ -1107,6 +1311,8 @@ export const runBonzaiRuntimeValidation = Effect.fn("runBonzaiRuntimeValidation"
                 baseUrl: input.baseUrl,
                 cwd,
                 configDir,
+                controlCwd: cwd,
+                controlConfigDir: configDir,
                 marker,
                 resume: e4.emittedSessionId,
                 prompt: "Reply with the exact nonsecret validation marker from the original turn.",
@@ -1124,16 +1330,15 @@ export const runBonzaiRuntimeValidation = Effect.fn("runBonzaiRuntimeValidation"
               });
         observations.push(e7);
 
-        const report: BonzaiRuntimeReport = {
+        const draftReport: BonzaiRuntimeReport = {
           schemaVersion: REPORT_SCHEMA_VERSION,
           // @effect-diagnostics-next-line globalDateInEffect:off - Timestamp is evidence metadata inside a Promise-based live runner.
           generatedAt: new Date().toISOString(),
           runtime: {
-            agentSdkVersion: SDK_VERSION,
-            bundledClaudeCodeVersion: CLAUDE_CODE_VERSION,
+            ...sdkProvenance,
             nodeVersion: NodeProcess.version,
             pnpmVersion: readPnpmVersion(),
-            lockfileVersion: "9.0",
+            lockfileVersion: readLockfileVersion(),
             platform,
             architecture,
           },
@@ -1147,7 +1352,8 @@ export const runBonzaiRuntimeValidation = Effect.fn("runBonzaiRuntimeValidation"
           isolation: {
             cwdLabel: "isolated-cwd",
             configDirLabel: "isolated-claude-config",
-            temporaryStateRemovedAfterRun: true,
+            // Replaced below with the observed cleanup outcome.
+            temporaryStateRemovedAfterRun: false,
             inheritedEnvironmentAllowlist: [...SAFE_ENVIRONMENT_NAMES],
           },
           observations,
@@ -1161,10 +1367,32 @@ export const runBonzaiRuntimeValidation = Effect.fn("runBonzaiRuntimeValidation"
           reviewerNotes: "",
         };
 
+        // Cleanup happens in the `finally` below, after the report is encoded, so it
+        // cannot be observed here. Remove the temporary root now and record the real
+        // outcome; the `finally` remains as a belt-and-braces guard for early exits.
+        const cleanupSucceeded = removeTemporaryState(tempRoot);
+        const report: BonzaiRuntimeReport = {
+          ...draftReport,
+          isolation: { ...draftReport.isolation, temporaryStateRemovedAfterRun: cleanupSucceeded },
+        };
+
         const encoded = await encodeAndValidateBonzaiRuntimeReport(report, secretSentinels);
-        const output = NodePath.resolve(input.output);
-        NodeFS.mkdirSync(NodePath.dirname(output), { recursive: true, mode: 0o700 });
-        NodeFS.chmodSync(NodePath.dirname(output), 0o700);
+        const output = resolveOutputPath(
+          input.output,
+          NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)),
+        );
+        const outputDirectory = NodePath.dirname(output);
+        // `mkdirSync` returns the first path it created, or undefined when the
+        // directory already existed. Only tighten permissions on a directory the
+        // probe owns; re-permissioning a pre-existing one is an unrequested side
+        // effect on a path we were merely pointed at.
+        const createdDirectory = NodeFS.mkdirSync(outputDirectory, {
+          recursive: true,
+          mode: 0o700,
+        });
+        if (createdDirectory !== undefined) {
+          NodeFS.chmodSync(createdDirectory, 0o700);
+        }
         NodeFS.writeFileSync(output, encoded, { encoding: "utf8", mode: 0o600, flag: "wx" });
         return { output, report, encoded };
       } finally {
@@ -1178,7 +1406,14 @@ export const runBonzaiRuntimeValidation = Effect.fn("runBonzaiRuntimeValidation"
         ? cause
         : new BonzaiRuntimeValidationWriteError({
             message: "Bonzai runtime validation failed before evidence was safely written.",
-            cause,
+            // `runMain` prints the cause, and terminals scroll into logs and
+            // screenshots. Redact before attaching so the leak guard's protection
+            // is not limited to the evidence file.
+            cause: redactSensitiveText(
+              cause instanceof Error ? (cause.stack ?? cause.message) : String(cause),
+              secretSentinels,
+              [tempRoot, NodeOS.homedir()],
+            ),
           }),
   });
 });
@@ -1235,6 +1470,9 @@ export const bonzaiRuntimeValidationCommand = Command.make(
 );
 
 if (import.meta.main) {
+  // `pnpm --filter t3 run probe:bonzai-runtime -- --help` forwards the separator
+  // itself as argv[2], which Effect CLI then reads as an unknown positional. Strip
+  // only that exact leading form; every other invocation is untouched.
   if (NodeProcess.argv[2] === "--") NodeProcess.argv.splice(2, 1);
   Command.run(bonzaiRuntimeValidationCommand, { version: "0.0.0" }).pipe(
     Effect.provide(NodeServices.layer),

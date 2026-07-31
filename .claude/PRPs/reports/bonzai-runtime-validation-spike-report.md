@@ -2,9 +2,9 @@
 
 **Plan**: `.claude/PRPs/plans/completed/bonzai-runtime-validation-spike.plan.md`
 **Source PRD**: `.claude/PRPs/prds/bonzai-project-keys.prd.md`
-**Branch**: `t3code/prd-generator-initiated`
+**Branch**: `bonzai/phase-1-runtime-validation`
 **Date**: 2026-07-31
-**Status**: COMPLETE (independent second-maintainer sign-off still outstanding)
+**Status**: COMPLETE — Level 6 evidence gate open. The live matrix was run by this report's author, so the independent re-run must come from another maintainer. Restricted gateway-side correlation (runbook review step 8) has not been performed by anyone.
 
 ---
 
@@ -125,6 +125,45 @@ The OpenAI-compatible `/v1/chat/completions` surface is not what Claude Code use
 - Effect diagnostics rejected global timers, `new Date()`, and direct `process.platform` access; resolved with explicit Node timers, shared host-process services, and scoped exceptions.
 - Two runs hung on `op read` awaiting biometric approval, not on the probe. Consolidated to a single secret read per run.
 - `timeout(1)` is unavailable on macOS; replaced with a PID-tracked watchdog.
+
+---
+
+## Post-Review Fixes (2026-07-31)
+
+An independent implementation review recorded 14 findings; all are resolved or documented.
+
+| Finding                                              | Resolution                                                                                                                                                                                               |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1 — rejected E6 credential recorded as `unsupported` | `unsupported` now requires an authorized, conclusive turn. Rejections, masked auth failures, result errors, and timeouts all route to `ambiguous`. Three rejection shapes covered by test.               |
+| 2 — hardcoded provenance                             | SDK and bundled Claude Code versions read from the installed manifest, `lockfileVersion` parsed from the lockfile, unmeasurable values recorded as `unknown`. Regression test asserts they are measured. |
+| 3 — pre-existing output directory re-permissioned    | `chmod` applies only to a directory the probe created.                                                                                                                                                   |
+| 4 — case-sensitive auth match                        | Lowercased before matching, both casings tested.                                                                                                                                                         |
+| 5 — masked-failure flag too broad                    | Split into `errorMaskedAsCompleted` (cause-agnostic) and `authFailureMaskedAsCompleted` (assistant auth error only).                                                                                     |
+| 6 — isolation claims were constants                  | `cwdMatchesControl`/`configDirMatchesControl` compare real paths; `temporaryStateRemovedAfterRun` reflects the observed cleanup.                                                                         |
+| 7 — message summaries bypassed redaction             | `assistantError` is redacted with the same secrets and paths as every other free-text field.                                                                                                             |
+| 8 — `--case-timeout-ms` unvalidated                  | Bounded to 1s–600s; a non-positive value is rejected before any case runs.                                                                                                                               |
+| 9 — unredacted defect reachable on stderr            | The defect is redacted before being attached as `cause`.                                                                                                                                                 |
+| 10, 11 — E0/E1 duplication, mirror drift             | Documented as deliberate and as accepted risk respectively, with reasons in code and runbook.                                                                                                            |
+| 12, 13, 14                                           | Stale branch metadata corrected, magic numbers named, argv strip explained.                                                                                                                              |
+
+### Additional defect found while re-running
+
+The first provenance fix silently degraded to `"unknown"`: the SDK's `exports` map does not expose `./package.json`, so `import.meta.resolve` threw. Corrected by resolving the entry point and walking up to the adjacent manifest, and covered by a test that asserts the values are measured rather than merely present.
+
+Running the runbook's own command surfaced a defect no static review would catch: `pnpm --filter t3 run` executes with the working directory set to `apps/server`, so a repo-root-relative `--output` wrote to `apps/server/artifacts/…`, which the root-anchored `.gitignore` pattern did **not** cover — the documented workflow produced a committable evidence file. Fixed three ways: the ignore pattern is now `**/artifacts/bonzai-runtime-validation/`, relative output paths resolve against the workspace root, and the runbook states the behavior. The stray report was relocated into the ignored directory.
+
+### Second review (approved, 4 low findings taken)
+
+| Finding                                                 | Resolution                                                                                                                                                                                                 |
+| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 15 — `cwdMatchesControl` derived but still tautological | Now compares resolved real paths via `realPathsMatch`, so a moved temp root, a symlink resolving elsewhere, or an unreadable transcript directory makes it false. Resolution failure counts as a mismatch. |
+| 16 — `resolveOutputPath` fell back to `process.cwd()`   | Fails closed with `BonzaiRuntimeValidationInputError` instead of silently reinstating the committable-evidence bug. Test asserts the throw.                                                                |
+| 17 — two orphaned doc comments                          | Provenance-policy block moved onto `readSdkProvenance`; `readLockfileVersion` has its own comment back.                                                                                                    |
+| 18 — `ReadonlySet<string>`                              | Typed `ReadonlySet<ResultClassification>`, so a typo is a compile error rather than a silent fail-open toward `unsupported`.                                                                               |
+
+Verification run `20260731T121255Z-review2` confirms the output-path fix in the real invocation: `pnpm --filter t3 run` executed with cwd `apps/server`, and evidence still landed at the repo root with no `apps/server/artifacts` created.
+
+Earlier evidence of record: `20260731T101633Z-final.json`, provenance fully measured (`agentSdkVersion: 0.3.170`, `bundledClaudeCodeVersion: 2.1.170`, `pnpmVersion: 11.10.0`, `lockfileVersion: 9.0`), decision `supported`, all substantive conclusions unchanged.
 
 ---
 
