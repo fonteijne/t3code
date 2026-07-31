@@ -4,7 +4,7 @@
 **Source PRD**: `.claude/PRPs/prds/bonzai-project-keys.prd.md`
 **Branch**: `bonzai/phase-1-runtime-validation`
 **Date**: 2026-07-31
-**Status**: COMPLETE — Level 6 evidence gate open. The live matrix was run by this report's author, so the independent re-run must come from another maintainer. Restricted gateway-side correlation (runbook review step 8) has not been performed by anyone.
+**Status**: COMPLETE — Level 6 evidence gate closed by project-owner risk acceptance on 2026-07-31. The live matrix was run by this report's author rather than independently re-run, and restricted gateway-side correlation was not performed; both auditability gaps were explicitly accepted and recorded in `.claude/PRPs/reviews/bonzai-phase-1-level-6-closure.md`.
 
 ---
 
@@ -169,7 +169,7 @@ Earlier evidence of record: `20260731T101633Z-final.json`, provenance fully meas
 
 ## Follow-ups
 
-- [ ] Independent second-maintainer review of the redacted report (plan's Level 6 gate; self-review is not independent)
+- [x] Level 6 evidence gate closed by project-owner risk acceptance; independent re-run and gateway-log correlation explicitly waived as non-blocking auditability gaps
 - [ ] Phase 3: auth-error mapping and retry/deadline cap
 - [ ] Phase 3: fresh-session fallback when a key change crosses billing contexts
 - [ ] Consider reporting the `is_error` gap in `turnStatusFromResult` as a provider-agnostic bug — it affects any gateway returning `subtype: "success"` with `is_error: true`
