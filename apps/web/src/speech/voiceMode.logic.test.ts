@@ -13,8 +13,10 @@ import {
   resolveVoiceModeEntry,
   voiceModeAnnouncement,
   voiceModeFollowTarget,
+  voiceModeLeftDraft,
   voiceModePresentation,
   voiceModeThreadRef,
+  voiceModeUnboundDraft,
 } from "./voiceMode.logic";
 
 const environmentId = EnvironmentId.make("environment-1");
@@ -240,6 +242,27 @@ describe("voiceModeFollowTarget", () => {
   });
 });
 
+describe("voiceModeLeftDraft", () => {
+  it("names the draft once, when its session binds to the thread it created", () => {
+    const working = snapshot({ phase: "working" }, onDraft);
+    const bound = { ...working, state: { ...working.state, threadId: threadB } };
+    expect(voiceModeLeftDraft(working, bound)).toEqual(ref(draftThread));
+    expect(
+      voiceModeLeftDraft(bound, { ...bound, state: { ...bound.state, threadId: threadA } }),
+    ).toBe(null);
+    // A session started on a thread, or a new session, leaves no draft behind.
+    expect(
+      voiceModeLeftDraft(
+        snapshot({ phase: "listening" }),
+        snapshot({ phase: "working", threadId: threadB }),
+      ),
+    ).toBe(null);
+    expect(
+      voiceModeLeftDraft(working, snapshot({ phase: "working", threadId: threadB }, onDraft)),
+    ).toBe(null);
+  });
+});
+
 describe("voiceModeAnnouncement", () => {
   const connecting = snapshot({ phase: "connecting" });
   const listening = snapshot({ phase: "listening", threadId: threadA });
@@ -304,5 +327,19 @@ describe("voiceModeAnnouncement", () => {
     expect(turns.slice(1).map((next, index) => voiceModeAnnouncement(turns[index]!, next))).toEqual(
       [null, null, null, null],
     );
+  });
+});
+
+describe("voiceModeUnboundDraft", () => {
+  it("names the draft only while an active session has no thread", () => {
+    expect(voiceModeUnboundDraft(snapshot({ phase: "listening" }, onDraft))).toEqual(
+      ref(draftThread),
+    );
+    expect(
+      voiceModeUnboundDraft(snapshot({ phase: "listening", threadId: threadB }, onDraft)),
+    ).toBeNull();
+    expect(voiceModeUnboundDraft(snapshot({ phase: "ended" }, onDraft))).toBeNull();
+    expect(voiceModeUnboundDraft(snapshot({ phase: "listening" }))).toBeNull();
+    expect(voiceModeUnboundDraft(IDLE)).toBeNull();
   });
 });

@@ -5,6 +5,7 @@ import type {
   ThreadId,
   VoiceAgentActivityKind,
   VoiceAgentFailureReason,
+  VoiceAgentLaunchSettings,
 } from "@t3tools/contracts";
 import { mFallback } from "gt-i18n";
 import type { MFunctionType } from "gt-i18n/types";
@@ -151,6 +152,8 @@ export type VoiceAgentStartInput = {
   /** The destination the user consented to; sent in `start` so the server can refuse another. */
   readonly endpointId: ProviderInstanceId;
   readonly baseUrl: string;
+  /** The composer's model and modes: a thread the voice agent creates uses them. */
+  readonly launch?: VoiceAgentLaunchSettings;
   /** Mints the ticket and builds the URL. Called once per start. */
   readonly getStreamUrl: (options: { readonly signal: AbortSignal }) => Promise<string>;
   /** False once this destination's consent is gone. Read before every frame. */
@@ -319,6 +322,7 @@ export class VoiceAgentController {
           ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
           endpointId: input.endpointId,
           baseUrl: input.baseUrl,
+          ...(input.launch === undefined ? {} : { launch: input.launch }),
         },
         canSend: input.hasConsent,
         onEvent: (event) => {

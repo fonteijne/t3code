@@ -163,6 +163,7 @@ const makeHarness = Effect.fn("makeHarness")(function* (options: HarnessOptions 
   let openEndpoints = 0;
   const connects = yield* Queue.unbounded<Endpoint>();
   const executed: Array<string> = [];
+  const opened: Array<Parameters<VoiceAgentThreads.VoiceAgentThreads["Service"]["open"]>[0]> = [];
   const toolsEntered = yield* Queue.unbounded<string>();
   const toolScripts = yield* Queue.unbounded<ToolScript>();
   let finishedTools = 0;
@@ -200,18 +201,22 @@ const makeHarness = Effect.fn("makeHarness")(function* (options: HarnessOptions 
           SecureRandom.make((size) => new Uint8Array(size).fill(7)),
         ),
         Layer.mock(VoiceAgentThreads.VoiceAgentThreads)({
-          open: ({ projectId, threadId, sessionId }) =>
-            options.openError !== undefined
-              ? Effect.fail(options.openError)
-              : Effect.succeed({
-                  binding: { projectId, threadId, sessionId, calls: 0, ceiling: null },
-                  context: {
-                    projectTitle: "Voice project",
-                    thread: threadId === null ? null : { title: "Thread one", status: "idle" },
-                    agentsFile: "",
-                    claudeFile: "",
-                  },
-                }),
+          open: ({ projectId, threadId, sessionId, ...rest }) =>
+            Effect.sync(() => opened.push({ projectId, threadId, sessionId, ...rest })).pipe(
+              Effect.andThen(() =>
+                options.openError !== undefined
+                  ? Effect.fail(options.openError)
+                  : Effect.succeed({
+                      binding: { projectId, threadId, sessionId, calls: 0, ceiling: null },
+                      context: {
+                        projectTitle: "Voice project",
+                        thread: threadId === null ? null : { title: "Thread one", status: "idle" },
+                        agentsFile: "",
+                        claudeFile: "",
+                      },
+                    }),
+              ),
+            ),
           execute: (binding, call) =>
             Effect.suspend(() => {
               executed.push(call.name);
@@ -328,6 +333,7 @@ const makeHarness = Effect.fn("makeHarness")(function* (options: HarnessOptions 
     openClient,
     connects,
     executed,
+    opened,
     /** The call id of the next tool call that began to run, waiting for it. */
     toolEntered: Queue.take(toolsEntered),
     finishedTools: () => finishedTools,
@@ -366,6 +372,8 @@ const makeHarness = Effect.fn("makeHarness")(function* (options: HarnessOptions 
           ),
         ),
       ),
+    /** The next tool call dies instead of answering. */
+    dieTool: Effect.asVoid(Queue.offer(toolScripts, () => Effect.die("A service died."))),
     notify: (
       watchedThread: ThreadId,
       ...notices: ReadonlyArray<VoiceAgentThreads.VoiceAgentThreadNotice>
@@ -711,6 +719,58 @@ it.effect("runs a tool call and asks for the reply only when nobody is speaking"
   ),
 );
 
+it.effect("asks for one reply at a time and still reports what arrived while it was asked", () =>
+  voiceTest({}, (harness) =>
+    Effect.gen(function* () {
+      const { endpoint } = yield* liveSession(harness, THREAD);
+      yield* harness.answerTool({});
+      yield* endpoint.emit(functionCall("call_1"));
+      expect(yield* endpoint.nextSent).toMatchObject({ type: "function-output" });
+      expect(yield* endpoint.nextSent).toEqual({ type: "response", tools: true });
+      // The endpoint has not answered that request yet; a second one would be refused.
+      yield* harness.notify(THREAD, settledNotice(THREAD));
+      expect(yield* endpoint.nextSent).toMatchObject({ type: "note" });
+      expect(yield* endpoint.sentSoFar).toEqual([]);
+      // The reply was asked for before the note, so the note gets a reply of its own.
+      yield* endpoint.emit(responseStarted("resp_1"), responseEnded);
+      expect(yield* endpoint.nextSent).toEqual({ type: "response", tools: false });
+      // A refused request leaves nothing waiting on it.
+      yield* endpoint.emit({ type: "response-refused" });
+      yield* harness.notify(THREAD, approvalNotice(THREAD));
+      expect(yield* endpoint.nextSent).toMatchObject({ type: "note" });
+      expect(yield* endpoint.nextSent).toEqual({ type: "response", tools: false });
+    }),
+  ),
+);
+
+it.effect("answers a tool call that dies and keeps running the next ones", () =>
+  voiceTest({}, (harness) =>
+    Effect.gen(function* () {
+      const { client, endpoint } = yield* liveSession(harness, THREAD);
+      yield* harness.dieTool;
+      yield* endpoint.emit(responseStarted("resp_1"), functionCall("call_1"));
+      expect(yield* endpoint.nextSent).toEqual({
+        type: "function-output",
+        callId: "call_1",
+        output: '{"error":"T3 Code could not do that."}',
+      });
+      expect((yield* client.until("tool-activity")).at(-1)).toMatchObject({ status: "started" });
+      expect((yield* client.until("tool-activity")).at(-1)).toMatchObject({
+        callId: "call_1",
+        status: "failed",
+      });
+      yield* harness.answerTool({});
+      yield* endpoint.emit(functionCall("call_2"));
+      expect(yield* endpoint.nextSent).toEqual({
+        type: "function-output",
+        callId: "call_2",
+        output: '{"delivery":"started"}',
+      });
+      expect(harness.executed).toEqual(["send_to_agent", "send_to_agent"]);
+    }),
+  ),
+);
+
 it.effect("refuses a tool call when eight are already waiting", () =>
   voiceTest({}, (harness) =>
     Effect.gen(function* () {
@@ -766,6 +826,7 @@ it.effect("follows a tool call to another thread", () =>
       expect(yield* endpoint.nextSent).toMatchObject({ type: "function-output" });
       // The instructions are not sent again: the tool result says where the new thread stands.
       expect(yield* endpoint.nextSent).toEqual({ type: "response", tools: true });
+      yield* endpoint.emit(responseStarted("resp_1"), responseEnded);
 
       // A notice for the thread the session left is dropped, wherever it comes from.
       yield* harness.notify(
@@ -775,7 +836,7 @@ it.effect("follows a tool call to another thread", () =>
       );
       const note = yield* endpoint.nextSent;
       expect(note).toMatchObject({ type: "note" });
-      expect(note.type === "note" && note.text).toContain('"Thread two"');
+      expect(note.type === "note" && note.text).toContain("<<<agent\nThread two\nagent>>>");
       expect(yield* endpoint.nextSent).toEqual({ type: "response", tools: false });
       expect([...harness.watching]).toEqual([OTHER_THREAD]);
       yield* client.send({ type: "end" });
@@ -798,6 +859,7 @@ it.effect("appends a thread notice at once and reports it when nobody is speakin
       yield* endpoint.emit(responseEnded);
       // Tools off: the note carries text the coding agent wrote.
       expect(yield* endpoint.nextSent).toEqual({ type: "response", tools: false });
+      yield* endpoint.emit(responseStarted("resp_report"), responseEnded);
 
       // During the developer's speech, and in the grace after it, no reply is requested.
       yield* endpoint.emit({ type: "speech-started" });
@@ -905,6 +967,7 @@ it.effect("stays open while the thread works and ends once it has been quiet", (
       expect(yield* endpoint.nextSent).toMatchObject({ type: "function-output" });
       expect(yield* endpoint.nextSent).toEqual({ type: "response", tools: true });
       expect(yield* endpoint.nextSent).toMatchObject({ type: "note" });
+      yield* endpoint.emit(responseStarted("resp_1"), responseEnded);
       expect(yield* endpoint.nextSent).toEqual({ type: "response", tools: false });
 
       yield* advance(client, endpoint, 360_000);
@@ -1237,6 +1300,27 @@ it.effect.each([
   ),
 );
 
+it.effect("hands the composer's selection from start to the thread tools", () =>
+  voiceTest({}, (harness) =>
+    Effect.gen(function* () {
+      const launch = {
+        modelSelection: { instanceId: "codex", model: "gpt-5.5" },
+        runtimeMode: "approval-required",
+        interactionMode: "plan",
+      };
+      const client = yield* harness.openClient();
+      yield* client.send(startCommand({ launch }));
+      yield* Queue.take(harness.connects);
+      expect(yield* client.nextEvent).toEqual({ type: "ready", threadId: null });
+      yield* liveSession(harness, THREAD);
+      expect(harness.opened.map(({ threadId, launch }) => ({ threadId, launch }))).toEqual([
+        { threadId: null, launch },
+        { threadId: THREAD, launch: undefined },
+      ]);
+    }),
+  ),
+);
+
 it.effect("sends the saved key only to the address it was saved for", () =>
   voiceTest({ settings: settingsWith({ apiKey: VAULT_KEY }), secret: KEY }, (harness) =>
     Effect.gen(function* () {
@@ -1247,8 +1331,10 @@ it.effect("sends the saved key only to the address it was saved for", () =>
       expect(endpoint.input.apiKey && Redacted.value(endpoint.input.apiKey)).toBe(KEY);
       expect(endpoint.input.instructions).toContain("Project: Voice project");
 
-      // An unrelated settings change leaves the session alone.
+      // An unrelated settings change leaves the session alone: it still relays the endpoint.
       yield* harness.updateSettings(settingsWith({ apiKey: VAULT_KEY, label: "Renamed" }));
+      yield* endpoint.emit(responseStarted("resp_1"), audio("item_a", 100));
+      expect(yield* client.nextEvent).toEqual({ type: "agent-speech-started", itemId: "item_a" });
       // Re-pointing the endpoint ends it: a save that changes the address clears a kept key.
       const moved = "https://elsewhere.example/v1";
       yield* harness.updateSettings(settingsWith({ baseUrl: moved, apiKey: "" }));
@@ -1285,6 +1371,11 @@ it.effect.each([
   {
     name: "the voice model is changed",
     next: settingsWith({ voiceModel: "another-voice-model" }),
+    reason: "not-configured",
+  },
+  {
+    name: "the endpoint is removed",
+    next: settingsWith({}, { textGenerators: {} }),
     reason: "not-configured",
   },
 ] as const)("ends a live session when $name", ({ next, reason }) =>

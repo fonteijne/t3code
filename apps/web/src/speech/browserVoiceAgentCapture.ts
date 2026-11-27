@@ -73,7 +73,7 @@ export function createBrowserVoiceAgentCapture(input: {
         check();
 
         // Firefox cannot connect a microphone to a context at another rate; its default rate works
-        // because the worklet resamples.
+        // because the worklet resamples, up as well as down.
         const open = (options?: AudioContextOptions) => {
           const context = new AudioContext(options);
           try {

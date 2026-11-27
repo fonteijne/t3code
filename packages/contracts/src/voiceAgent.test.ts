@@ -73,6 +73,20 @@ it("accepts only commands a session can act on", () => {
   expect(decodeCommand(encodeCommand(start))).toEqual(Option.some(start));
   const bound = { ...start, threadId };
   expect(decodeCommand(encodeCommand(bound))).toEqual(Option.some(bound));
+  const launched = {
+    ...start,
+    launch: {
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.5" },
+      runtimeMode: "approval-required",
+      interactionMode: "plan",
+    },
+  } as const;
+  expect(decodeCommand(encodeCommand(launched))).toEqual(Option.some(launched));
+  expect(
+    decodeCommand(
+      JSON.stringify({ ...launched, launch: { ...launched.launch, runtimeMode: "root" } }),
+    ),
+  ).toEqual(Option.none());
   const { endpointId: _endpointId, ...withoutEndpoint } = start;
   expect(decodeCommand(JSON.stringify(withoutEndpoint))).toEqual(Option.none());
   const { baseUrl: _baseUrl, ...withoutBaseUrl } = start;

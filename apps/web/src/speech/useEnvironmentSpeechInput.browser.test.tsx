@@ -196,6 +196,11 @@ vi.mock("@t3tools/client-runtime/voice-input", async (importOriginal) => ({
       return { text: `Cleaned ${transcript}` };
     }),
 }));
+// AppRouteModal mounts it, and its thread lookup reaches ../state/server, which needs the real
+// ../state/session. Voice mode has its own tests.
+vi.mock("../components/chat/GlobalVoiceModeIndicator", () => ({
+  GlobalVoiceModeIndicator: () => null,
+}));
 vi.mock("./appleSpeech", () => ({
   useAppleSpeechLocales: () => (mocks.appleSpeech ? ["en-US"] : []),
 }));

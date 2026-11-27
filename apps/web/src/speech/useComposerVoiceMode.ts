@@ -1,5 +1,10 @@
 import { voiceAgentIsActive } from "@t3tools/client-runtime/voice-agent";
-import type { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
+import type {
+  EnvironmentId,
+  ProjectId,
+  ThreadId,
+  VoiceAgentLaunchSettings,
+} from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { msg, useMessages } from "gt-react";
 import { useState, useSyncExternalStore } from "react";
@@ -40,6 +45,8 @@ export function useComposerVoiceMode(input: {
   /** The server thread, or the draft's reserved thread id. */
   readonly threadId: ThreadId | null;
   readonly composer: ComposerVoiceModeInput | null;
+  /** The composer's current model and modes: a thread the voice agent creates uses them. */
+  readonly launch: VoiceAgentLaunchSettings;
 }): {
   readonly entry: VoiceModeEntry;
   /** `connecting` only while this app's session is starting. */
@@ -85,7 +92,7 @@ export function useComposerVoiceMode(input: {
   // output inside the gesture that asked for it.
   const start = () => {
     const next = target();
-    if (next !== null) void voiceAgentSession.start(next);
+    if (next !== null) void voiceAgentSession.start(next, input.launch);
   };
   const toggle = () => {
     switch (entry.kind) {

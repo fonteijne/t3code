@@ -6,12 +6,14 @@ import {
   ThreadId,
   type OrchestrationV2ThreadShell,
   type TextGeneratorConfig,
+  type VoiceAgentLaunchSettings,
 } from "@t3tools/contracts";
 import { expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
 import "~/index.css";
 
 import { render } from "../../../test/render";
+import { useRightPanelStore } from "../../rightPanelStore";
 import { useComposerVoiceMode } from "../../speech/useComposerVoiceMode";
 import type {
   VoiceAgentAvailability,
@@ -19,6 +21,7 @@ import type {
   VoiceAgentTarget,
 } from "../../speech/voiceAgentSession";
 import { chooseVoiceAgentDestination } from "../../speech/voiceConsent";
+import { registerVoiceModeEndCommand } from "../../speech/voiceModeLifecycle";
 import { ToastProvider } from "../ui/toast";
 import { ComposerVoiceModeButton } from "./ComposerVoiceModeButton";
 import { GlobalVoiceModeIndicator } from "./GlobalVoiceModeIndicator";
@@ -31,8 +34,13 @@ const fake = vi.hoisted(() => ({
   snapshot: null as unknown as VoiceAgentSessionSnapshot,
   availability: { status: "hidden" } as VoiceAgentAvailability,
   /** What `start` saw: its target, and whether the grant for the destination was already stored. */
-  starts: [] as Array<{ target: VoiceAgentTarget; granted: boolean }>,
+  starts: [] as Array<{
+    target: VoiceAgentTarget;
+    launch: VoiceAgentLaunchSettings | undefined;
+    granted: boolean;
+  }>,
   shells: new Map<string, { title: string; lineage: Lineage }>(),
+  ends: 0,
 }));
 
 // The real session opens audio devices and sockets; these tests are about what the UI does with it.
@@ -50,15 +58,18 @@ vi.mock("../../speech/voiceAgentSession", async () => {
     voiceAgentSession: {
       subscribe,
       getSnapshot,
-      start: (target: VoiceAgentTarget) => {
+      start: (target: VoiceAgentTarget, launch?: VoiceAgentLaunchSettings) => {
         const { availability } = fake;
         fake.starts.push({
           target,
+          launch,
           granted: "destination" in availability && bindVoiceAgentGrant(availability.destination)(),
         });
         return Promise.resolve();
       },
-      end: () => {},
+      end: () => {
+        fake.ends += 1;
+      },
       dismiss: () => {},
     },
     useVoiceAgentSnapshot: () => useSyncExternalStore(subscribe, getSnapshot),
@@ -100,6 +111,11 @@ const resolution = {
   model: "realtime-voice",
   source: "only-endpoint",
 } as const;
+const launch: VoiceAgentLaunchSettings = {
+  modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.5" },
+  runtimeMode: "approval-required",
+  interactionMode: "default",
+};
 const IDLE_STATE: VoiceAgentState = {
   phase: "idle",
   threadId: null,
@@ -130,6 +146,7 @@ function setup(
   fake.snapshot = input.snapshot ?? { state: IDLE_STATE, target: null };
   fake.availability = input.availability ?? { status: "hidden" };
   fake.starts = [];
+  fake.ends = 0;
   fake.shells = new Map([[threadA, { title: "Thread A", lineage: input.lineage ?? ORDINARY }]]);
   chooseVoiceAgentDestination(null);
   return { [Symbol.dispose]: () => chooseVoiceAgentDestination(null) };
@@ -141,6 +158,7 @@ function Composer() {
     projectId,
     threadId: threadA,
     composer: "thread",
+    launch,
   });
   return (
     <ToastProvider>
@@ -178,6 +196,7 @@ it("asks where microphone audio goes before the first start, and starts once it 
     {
       granted: true,
       target: { environmentId, projectId, threadId: threadA, draftThreadId: null },
+      launch,
     },
   ]);
 });
@@ -231,4 +250,74 @@ it.each([
   await vi.waitFor(() =>
     expect(screen.router?.state.location.pathname).toBe(`/${environmentId}/${threadA}`),
   );
+});
+
+it("shows the session on its own thread while a maximized right panel hides the chat column", async () => {
+  using _state = setup({
+    snapshot: {
+      state: { ...IDLE_STATE, phase: "listening", threadId: threadA },
+      target: { environmentId, projectId, threadId: threadA, draftThreadId: null },
+    },
+  });
+  const threadRef = { environmentId, threadId: threadA };
+  using stack = new DisposableStack();
+  stack.defer(() => useRightPanelStore.getState().removeThread(threadRef));
+  await using screen = await render(
+    <GlobalVoiceModeIndicator shownTarget={{ kind: "server", threadRef }} />,
+  );
+  await expect.element(screen.getByRole("button", { name: "End" })).not.toBeInTheDocument();
+
+  useRightPanelStore.getState().show(threadRef);
+  useRightPanelStore.getState().setMaximized(threadRef, true);
+
+  await expect.element(screen.getByRole("button", { name: "End" })).toBeVisible();
+});
+
+it("ends a running session with the voice mode shortcut where no chat is shown", () => {
+  using _state = setup({
+    snapshot: {
+      state: { ...IDLE_STATE, phase: "listening", threadId: threadA },
+      target: { environmentId, projectId, threadId: threadA, draftThreadId: null },
+    },
+  });
+  using stack = new DisposableStack();
+  stack.defer(registerVoiceModeEndCommand());
+  const mac = navigator.platform.startsWith("Mac");
+  const press = () => {
+    // The default chord, Mod+Alt+V.
+    const event = new KeyboardEvent("keydown", {
+      key: "v",
+      code: "KeyV",
+      ctrlKey: !mac,
+      metaKey: mac,
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    window.dispatchEvent(event);
+    return event;
+  };
+
+  expect(press().defaultPrevented).toBe(true);
+  expect(fake.ends).toBe(1);
+
+  // Nothing to end: the chord is left to the page and the browser.
+  fake.snapshot = { state: IDLE_STATE, target: null };
+  expect(press().defaultPrevented).toBe(false);
+  expect(fake.ends).toBe(1);
+});
+
+it("names what the voice mode button does instead of announcing a pressed state", async () => {
+  using _state = setup();
+  await using screen = await render(
+    <ComposerVoiceModeButton
+      entry={{ kind: "active" }}
+      connecting={false}
+      shortcutLabel={null}
+      onToggle={() => {}}
+    />,
+  );
+  await expect
+    .element(screen.getByRole("button", { name: "End voice mode" }))
+    .not.toHaveAttribute("aria-pressed");
 });

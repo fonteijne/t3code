@@ -66,6 +66,11 @@ const threadA = ThreadId.make("thread-a");
 const threadB = ThreadId.make("thread-b");
 const endpointId = ProviderInstanceId.make("gateway");
 const baseUrl = "https://gateway.test/v1";
+const launch = {
+  modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.5" },
+  runtimeMode: "approval-required",
+  interactionMode: "plan",
+} as const;
 const STREAM_URL = "wss://environment.test/ws/voice-agent?wsTicket=ticket";
 const frame = () => new Int16Array(VOICE_AGENT_INPUT_FRAME_BYTES / 2);
 
@@ -130,6 +135,7 @@ function createHarness(overrides: HarnessOverrides = {}) {
     threadId: threadA,
     endpointId,
     baseUrl,
+    launch,
     getStreamUrl: async () => {
       order.push("ticket");
       return overrides.getStreamUrl ? overrides.getStreamUrl() : STREAM_URL;
@@ -203,7 +209,7 @@ describe("voice agent controller", () => {
 
     harness.socket.open();
     expect(harness.socket.commands()).toEqual([
-      { type: "start", projectId, threadId: threadA, endpointId, baseUrl },
+      { type: "start", projectId, threadId: threadA, endpointId, baseUrl, launch },
     ]);
     // The microphone is already open; what it captures before `ready` goes nowhere.
     harness.microphone()?.onFrame(frame());

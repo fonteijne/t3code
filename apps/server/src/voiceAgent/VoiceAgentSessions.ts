@@ -111,6 +111,7 @@ const AUTO_RESPONSE_GRACE_MS = 2_000;
 const KEY_READ_TIMEOUT = "5 seconds";
 const RESPONSE_FAILED_MESSAGE = "The voice model could not produce a reply. Try again.";
 const TOO_MANY_CALLS_OUTPUT = JSON.stringify({ error: VOICE_AGENT_TOOL_ERRORS.tooManyCalls });
+const TOOL_FAILED_OUTPUT = JSON.stringify({ error: VOICE_AGENT_TOOL_ERRORS.failed });
 
 const decodeCommand = Schema.decodeUnknownOption(Schema.fromJsonString(ReceivedVoiceAgentCommand));
 const sameCredential = Schema.toEquivalence(SettingsSecretValue);
@@ -179,10 +180,13 @@ const make = Effect.gen(function* () {
     mailbox: Queue.Queue<SessionInput>,
     scope: Scope.Scope,
   ) {
-    const internal = () => new VoiceAgentError({ reason: "internal" });
+    const internal = (stage: string) => (error: { readonly _tag: string }) =>
+      Effect.logWarning("A voice session could not start.", { stage, errorTag: error._tag }).pipe(
+        Effect.andThen(Effect.fail(new VoiceAgentError({ reason: "internal" }))),
+      );
     // Subscribed before the read, so a change between the two is not lost.
     const changes = yield* settingsService.subscribeChanges.pipe(Scope.provide(scope));
-    const settings = yield* settingsService.getSettings.pipe(Effect.mapError(internal));
+    const settings = yield* settingsService.getSettings.pipe(Effect.catch(internal("settings")));
     const resolved = resolveVoiceAgent(settings, command.projectId);
     if (!resolved.available) return yield* unavailable(resolved);
     // The device consented to one destination. Anything else is refused before the key is read
@@ -209,11 +213,12 @@ const make = Effect.gen(function* () {
       ),
       Effect.forkIn(scope),
     );
-    const sessionId = yield* random.uuidV4().pipe(Effect.mapError(internal));
+    const sessionId = yield* random.uuidV4();
     const { binding, context } = yield* threads.open({
       projectId: command.projectId,
       threadId: command.threadId ?? null,
       sessionId,
+      ...(command.launch === undefined ? {} : { launch: command.launch }),
     });
     const label = generatorLabel(resolved.endpoint);
     const unreadable = () =>
@@ -268,6 +273,8 @@ const make = Effect.gen(function* () {
       let watcher: Fiber.Fiber<void> | undefined;
       let userSpeaking = false;
       let responseActive = false;
+      // Our `response.create` is out and the endpoint has not answered it yet.
+      let responseRequested = false;
       let activeResponseId: string | undefined;
       let awaitingAutoResponseUntil: number | undefined;
       // "report": only a `[T3 Code]` note waits to be spoken. "full": a tool result waits.
@@ -292,7 +299,10 @@ const make = Effect.gen(function* () {
       // A failed write means the client is going away, and the client reader reports that.
       const send = (event: VoiceAgentEvent) => Effect.ignore(writer.write(JSON.stringify(event)));
 
-      const close = Effect.fnUntraced(function* (reason: VoiceAgentCloseReason, message?: string) {
+      const close = Effect.fn("VoiceAgentSessions.close")(function* (
+        reason: VoiceAgentCloseReason,
+        message?: string,
+      ) {
         micSink = undefined;
         closeReason = reason;
         yield* send({ type: "closed", reason, ...(message === undefined ? {} : { message }) });
@@ -302,18 +312,27 @@ const make = Effect.gen(function* () {
       const fail = (error: VoiceAgentError) => close(error.reason, error.message);
 
       // One reply at a time, and never on top of the user or of a reply the endpoint is about to
-      // start.
-      const maybeRespond = (connection: RealtimeUpstream.RealtimeConnection) => {
-        if (wantResponse === "no" || responseActive || userSpeaking || toolsRunning > 0) {
-          return Effect.void;
+      // start. Untraced: it runs per upstream event inside the `VoiceAgentSessions.serve` span.
+      const maybeRespond = Effect.fnUntraced(function* (
+        connection: RealtimeUpstream.RealtimeConnection,
+      ) {
+        if (
+          wantResponse === "no" ||
+          responseActive ||
+          responseRequested ||
+          userSpeaking ||
+          toolsRunning > 0
+        ) {
+          return;
         }
-        if (awaitingAutoResponseUntil !== undefined) return Effect.void;
+        if (awaitingAutoResponseUntil !== undefined) return;
         // A reply that only reports a note may not call tools: the note carries the coding
         // agent's text.
         const tools = wantResponse === "full";
         wantResponse = "no";
-        return connection.createResponse({ tools });
-      };
+        responseRequested = true;
+        yield* connection.createResponse({ tools });
+      });
 
       // Items play in the order sent, so one position describes all of them.
       const applyFlush = (
@@ -350,7 +369,7 @@ const make = Effect.gen(function* () {
         return Effect.all(sends, { discard: true });
       };
 
-      const startWatcher = Effect.fnUntraced(function* (
+      const startWatcher = Effect.fn("VoiceAgentSessions.startWatcher")(function* (
         target: VoiceAgentThreads.VoiceAgentBinding,
       ) {
         if (watcher !== undefined) yield* Fiber.interrupt(watcher);
@@ -365,6 +384,8 @@ const make = Effect.gen(function* () {
         );
       });
 
+      // finishTool, onSpeechStarted, onUpstreamEvent and onLiveInput run per upstream event or
+      // client input; `VoiceAgentSessions.serve` is their span.
       const finishTool = Effect.fnUntraced(function* (
         connection: RealtimeUpstream.RealtimeConnection,
         callId: string,
@@ -426,12 +447,15 @@ const make = Effect.gen(function* () {
           case "response-started":
             responseActive = true;
             activeResponseId = event.responseId;
-            // A reply that starts now already has every note and tool result in its context.
-            wantResponse = "no";
+            // The endpoint's own reply already has every note and tool result in its context. Ours
+            // may not have what arrived after we asked for it, so that still gets a reply.
+            if (!responseRequested) wantResponse = "no";
+            responseRequested = false;
             awaitingAutoResponseUntil = undefined;
             return yield* signalActivity;
           case "response-ended":
             responseActive = false;
+            responseRequested = false;
             activeResponseId = undefined;
             output.endAll();
             if (event.status === "failed") {
@@ -444,6 +468,7 @@ const make = Effect.gen(function* () {
             yield* maybeRespond(connection);
             return yield* signalActivity;
           case "response-refused":
+            responseRequested = false;
             return yield* send({
               type: "error",
               code: "response-failed",
@@ -569,7 +594,7 @@ const make = Effect.gen(function* () {
         }
       });
 
-      const goLive = Effect.fnUntraced(function* (session: LiveSession) {
+      const goLive = Effect.fn("VoiceAgentSessions.goLive")(function* (session: LiveSession) {
         const { connection } = session;
         phase = "live";
         live = session;
@@ -589,6 +614,16 @@ const make = Effect.gen(function* () {
           Effect.flatMap((call) =>
             // A request that started to be dispatched finishes even when the client hangs up.
             Effect.uninterruptible(threads.execute(workerBinding, call)).pipe(
+              // A defect still answers the call, or the session would wait for it for good.
+              Effect.catchDefect((defect) =>
+                Effect.logError("A voice agent tool call died.", defect).pipe(
+                  Effect.as({
+                    ok: false,
+                    output: TOOL_FAILED_OUTPUT,
+                    binding: { ...workerBinding, calls: workerBinding.calls + 1 },
+                  }),
+                ),
+              ),
               Effect.flatMap((outcome) => {
                 workerBinding = outcome.binding;
                 return offer({ _tag: "tool-result", callId: call.callId, outcome });
@@ -637,8 +672,12 @@ const make = Effect.gen(function* () {
                   onFailure: (error) => offer({ _tag: "failed", error }),
                   onSuccess: (started) => offer({ _tag: "started", live: started }),
                 }),
-                Effect.catchDefect(() =>
-                  offer({ _tag: "failed", error: new VoiceAgentError({ reason: "internal" }) }),
+                Effect.catchDefect((defect) =>
+                  Effect.logError("A voice session could not start.", defect).pipe(
+                    Effect.andThen(
+                      offer({ _tag: "failed", error: new VoiceAgentError({ reason: "internal" }) }),
+                    ),
+                  ),
                 ),
                 Effect.forkIn(scope),
               );

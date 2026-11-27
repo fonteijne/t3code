@@ -18,6 +18,7 @@ import {
   type RuntimeRequestId,
   type ThreadId,
   VoiceAgentError,
+  type VoiceAgentLaunchSettings,
   isRuntimeModeAbove,
   linkOriginIsFenced,
 } from "@t3tools/contracts";
@@ -34,11 +35,16 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
+import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import * as GitManager from "../git/GitManager.ts";
+import {
+  DispatchModeLimit,
+  type DispatchModeRefusal,
+} from "../orchestration-v2/DispatchModeLimit.ts";
 import { isProviderSignOutPrompt } from "../orchestration-v2/CommandPolicy.ts";
 import { OrchestratorRuntimeModeAboveCeilingError } from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
@@ -54,6 +60,8 @@ import {
   decodeSwitchArguments,
   fenceAgentText,
   shortenAgentReply,
+  shownQuestionId,
+  shownRequestId,
   unfenceAgentText,
   VOICE_AGENT_TOOL_ERRORS,
   VOICE_AGENT_TOOLS,
@@ -77,8 +85,10 @@ export interface VoiceAgentBinding {
   readonly sessionId: string;
   /** Tool calls this session has dispatched so far. */
   readonly calls: number;
-  /** Null until a thread is bound. Only ever narrows. */
+  /** Null until a thread is bound, unless the session started with launch settings. Only ever narrows. */
   readonly ceiling: VoiceAgentCeiling | null;
+  /** What the composer showed at `start`: a thread the voice agent creates uses it first. */
+  readonly launch?: VoiceAgentLaunchSettings;
 }
 
 export interface VoiceAgentToolOutcome {
@@ -102,6 +112,7 @@ export class VoiceAgentThreads extends Context.Service<
       readonly projectId: ProjectId;
       readonly threadId: ThreadId | null;
       readonly sessionId: string;
+      readonly launch?: VoiceAgentLaunchSettings;
     }) => Effect.Effect<
       { readonly binding: VoiceAgentBinding; readonly context: VoiceAgentContext },
       VoiceAgentError
@@ -226,7 +237,7 @@ const agentText = (text: string) => (text.trim() === "" ? "" : fenceAgentText(te
 const shownLabel = (label: string) => unfenceAgentText(fenceAgentText(label)).toLowerCase();
 
 const questionForModel = (question: OrchestrationV2UserInputQuestion) => ({
-  id: question.id,
+  id: agentText(shownQuestionId(question.id)),
   title: agentText(question.header),
   question: agentText(question.question),
   options: question.options.map((option) => ({
@@ -251,7 +262,12 @@ const answersFor = (
   | { readonly error: string } => {
   const answers: Record<string, string | ReadonlyArray<string>> = {};
   for (const question of questions) {
-    const answer = given.find((candidate) => candidate.question_id === question.id);
+    const shownId = shownQuestionId(question.id);
+    const answer = given.find(
+      (candidate) =>
+        candidate.question_id === question.id ||
+        shownQuestionId(unfenceAgentText(candidate.question_id)) === shownId,
+    );
     const text = answer?.text?.trim() ?? "";
     if (text !== "" && question.allowCustomAnswer !== false) {
       answers[question.id] = text;
@@ -348,7 +364,7 @@ const make = Effect.gen(function* () {
   });
 
   const statusOutput = (state: Effect.Success<ReturnType<typeof threadStatus>>) => ({
-    thread: state.thread.title,
+    thread: agentText(state.thread.title),
     status: state.status,
     ...(state.idle === undefined
       ? {}
@@ -378,7 +394,9 @@ const make = Effect.gen(function* () {
       projectId,
       project,
     ).settings;
+    const { launch } = binding;
     const modelSelection =
+      launch?.modelSelection ??
       resolveNewThreadModelSelection({
         defaultSelection: defaults.defaultModelSelection,
         fallbackSelection: defaults.fallbackModelSelection,
@@ -393,10 +411,13 @@ const make = Effect.gen(function* () {
             .thread.modelSelection);
     if (modelSelection === null) return refused(VOICE_AGENT_TOOL_ERRORS.noDefaultModel);
     const ceiling = binding.ceiling;
+    const wantedRuntimeMode = launch?.runtimeMode ?? defaults.defaultRuntimeMode;
     const runtimeMode =
-      ceiling !== null && isRuntimeModeAbove(defaults.defaultRuntimeMode, ceiling.runtimeMode)
+      ceiling !== null && isRuntimeModeAbove(wantedRuntimeMode, ceiling.runtimeMode)
         ? ceiling.runtimeMode
-        : defaults.defaultRuntimeMode;
+        : wantedRuntimeMode;
+    const interactionMode =
+      ceiling?.interactionMode === "plan" ? "plan" : (launch?.interactionMode ?? "default");
     const workspaceStrategy = yield* launches.defaultWorkspaceStrategy({
       workspaceRoot: project.workspaceRoot,
       settings: defaults,
@@ -413,7 +434,7 @@ const make = Effect.gen(function* () {
       generateTitle: true,
       modelSelection,
       runtimeMode,
-      interactionMode: ceiling?.interactionMode ?? "default",
+      interactionMode,
       workspaceStrategy,
       initialMessage: {
         messageId: MessageId.make(`voice:${binding.sessionId}:${binding.calls}`),
@@ -425,7 +446,7 @@ const make = Effect.gen(function* () {
     });
     const thread = launched.projection.thread;
     return done(
-      { status: "started", new_thread: thread.title },
+      { status: "started", new_thread: agentText(thread.title) },
       { threadId: launched.threadId, ceiling: narrow(ceiling, thread) },
     );
   });
@@ -509,7 +530,7 @@ const make = Effect.gen(function* () {
       const item = questionItemOf(records.turnItems, request.id);
       if (item === undefined) continue;
       return done({
-        request_id: request.id,
+        request_id: shownRequestId(request.id),
         questions: item.questions.map(questionForModel),
         approval_waiting: approvalWaiting,
       });
@@ -525,8 +546,12 @@ const make = Effect.gen(function* () {
     const args = decodeAnswerArguments(json);
     if (Option.isNone(args)) return refused(VOICE_AGENT_TOOL_ERRORS.notUnderstood);
     const records = yield* pendingRequests({ projectId: binding.projectId, threadId });
-    const requestId = args.value.request_id.trim();
-    const request = records.runtimeRequests.find((candidate) => candidate.id === requestId);
+    // Compared in the form the speech model was shown, which is all it can echo.
+    const requestId = shownRequestId(args.value.request_id.trim());
+    const request =
+      requestId === ""
+        ? undefined
+        : records.runtimeRequests.find((candidate) => shownRequestId(candidate.id) === requestId);
     if (request === undefined) return refused(VOICE_AGENT_TOOL_ERRORS.questionGone);
     if (request.kind !== "user_input") return refused(VOICE_AGENT_TOOL_ERRORS.approvalRefused);
     const item = questionItemOf(records.turnItems, request.id);
@@ -552,7 +577,7 @@ const make = Effect.gen(function* () {
     return done({
       threads: listed.slice(0, LISTED_THREADS).map((thread) => ({
         id: thread.id,
-        title: thread.title,
+        title: agentText(thread.title),
         ...(thread.id === binding.threadId ? { current: true } : {}),
       })),
       ...(listed.length > LISTED_THREADS ? { more: listed.length - LISTED_THREADS } : {}),
@@ -654,13 +679,29 @@ const make = Effect.gen(function* () {
       // The name is the endpoint's string, so only a known one is recorded.
       const tool = TOOL_NAMES.has(call.name) ? call.name : "unknown";
       yield* Effect.annotateCurrentSpan({ "voice.tool": tool });
+      const raised = yield* Ref.make<DispatchModeRefusal | undefined>(undefined);
+      const { ceiling } = binding;
       const result = yield* runTool(binding, call).pipe(
+        // The orchestrator rechecks under the thread's lock: its modes may have been raised in the
+        // app since the session was bound. Stopping starts no work, so it stays open.
+        ceiling === null || call.name === "interrupt_agent"
+          ? (effect) => effect
+          : Effect.provideService(DispatchModeLimit, {
+              runtimeMode: ceiling.runtimeMode,
+              interactionMode: ceiling.interactionMode,
+              refused: raised,
+            }),
         Effect.catch((error) =>
-          // Arguments, texts and outputs are never logged: they are what the developer said.
-          Effect.logWarning("A voice agent tool call failed.", {
-            tool,
-            errorTag: error._tag,
-          }).pipe(Effect.as(refused(toolFailure(error)))),
+          Effect.gen(function* () {
+            // Arguments, texts and outputs are never logged: they are what the developer said.
+            yield* Effect.logWarning("A voice agent tool call failed.", {
+              tool,
+              errorTag: error._tag,
+            });
+            return (yield* Ref.get(raised)) === undefined
+              ? refused(toolFailure(error))
+              : refused(VOICE_AGENT_TOOL_ERRORS.threadRaised);
+          }),
         ),
       );
       return {
@@ -674,7 +715,7 @@ const make = Effect.gen(function* () {
 
   const open: VoiceAgentThreads["Service"]["open"] = Effect.fn("VoiceAgentThreads.open")(
     function* (input) {
-      const { projectId, threadId, sessionId } = input;
+      const { projectId, threadId, sessionId, launch } = input;
       const notFound = new VoiceAgentError({ reason: "not-found" });
       const project = yield* projects.getById(projectId).pipe(
         Effect.map(Option.getOrUndefined),
@@ -690,11 +731,15 @@ const make = Effect.gen(function* () {
                 () => notFound,
               ),
               Effect.andThen(threadStatus({ projectId, threadId })),
-              Effect.mapError((error) =>
+              Effect.catch((error) =>
                 error._tag === "VoiceAgentError" ||
                 error._tag === "ThreadManagementThreadNotFoundError"
-                  ? notFound
-                  : new VoiceAgentError({ reason: "internal" }),
+                  ? Effect.fail(notFound)
+                  : Effect.logWarning("A voice session could not read its thread.", {
+                      errorTag: error._tag,
+                    }).pipe(
+                      Effect.andThen(Effect.fail(new VoiceAgentError({ reason: "internal" }))),
+                    ),
               ),
             );
       // The project folder's files, once: a thread's worktree copy is the coding agent's to read.
@@ -712,7 +757,18 @@ const make = Effect.gen(function* () {
           threadId,
           sessionId,
           calls: 0,
-          ceiling: state === null ? null : ceilingOf(state.thread),
+          // Unbound, nothing may launch above what the composer showed.
+          ceiling:
+            state !== null
+              ? ceilingOf(state.thread)
+              : launch === undefined
+                ? null
+                : {
+                    runtimeMode: launch.runtimeMode,
+                    interactionMode: launch.interactionMode,
+                    fencedLink: undefined,
+                  },
+          ...(launch === undefined ? {} : { launch }),
         },
         context: {
           projectTitle: project.title,

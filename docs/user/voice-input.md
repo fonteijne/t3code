@@ -1,6 +1,6 @@
 # Voice input
 
-Dictate into the composer, citation comments, diff/file annotations, PR comments, and desktop browser annotations. Transcripts land in your draft for review—nothing is sent to an agent until you submit.
+Dictate into the composer, citation comments, diff/file annotations, PR comments, and desktop browser annotations. Transcripts land in your draft for review—nothing is sent to an agent until you submit. To talk with an agent instead of dictating, see [Voice mode](./voice-mode.md).
 
 ## Choose where audio goes
 

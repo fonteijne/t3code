@@ -11,6 +11,7 @@ To free a default shortcut, choose **Unassign** from its row menu (**Reset to de
 | Action                      | Default           | Notes                                                              |
 | --------------------------- | ----------------- | ------------------------------------------------------------------ |
 | Start / finish dictation    | `mod+shift+d`     | `Esc` discards. See [Voice input](./voice-input.md).               |
+| Start / end voice mode      | `mod+alt+v`       | See [Voice mode](./voice-mode.md).                                 |
 | Opposite queue/steer action | `mod+Enter`       | Uses the non-default follow-up behavior while a turn runs.         |
 | Start thread in background  | `mod+Alt+Enter`   | Also `mod+Enter` in a new thread; opens a fresh draft immediately. |
 | Send first queued message   | `mod+Shift+Enter` | Steers if running, or starts a turn if stopped.                    |

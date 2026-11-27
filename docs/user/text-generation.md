@@ -11,6 +11,7 @@ Open **Settings → Providers → Text generators → Add generator** (stored pe
 - **OpenAI** or **Anthropic**: Enter an API key.
 - **OpenRouter**: Enter an OpenRouter API key to use any model it serves.
 - **Custom (OpenAI-compatible)**: Enter a base URL (e.g. Ollama at `http://localhost:11434/v1` or LM Studio—`localhost` resolves on the environment's server).
+- **Voice model (optional)** (OpenAI-compatible generators): The realtime speech model [Voice mode](./voice-mode.md) uses on this endpoint.
 
 Click **Test** beside a model picker to verify the key works, or **Show models** to refresh the catalog. Disabling or removing a generator falls back to the environment's default text generation model.
 

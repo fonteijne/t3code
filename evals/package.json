@@ -10,6 +10,7 @@
     "thread-titles": "node --env-file-if-exists=../.env thread-titles/run.ts",
     "pr-content": "node --env-file-if-exists=../.env pr-content/run.ts",
     "voice-cleanup": "node --env-file-if-exists=../.env voice-cleanup/run.ts",
+    "voice-agent": "node --env-file-if-exists=../.env voice-agent/run.ts",
     "test-signal": "node --env-file-if-exists=../.env test-signal/run.ts",
     "workflow-authoring": "node --env-file-if-exists=../.env workflow-authoring/run.ts",
     "typecheck": "effect-tsgo tsrs --noEmit",

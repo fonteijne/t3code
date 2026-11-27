@@ -12,6 +12,7 @@ import {
   type EnvironmentId,
   type ProjectId,
   type ThreadId,
+  type VoiceAgentLaunchSettings,
 } from "@t3tools/contracts";
 import {
   resolveVoiceAgent,
@@ -126,7 +127,7 @@ class VoiceAgentSession {
    * audio start inside the gesture, and everything up to the controller call here is synchronous.
    * Does nothing while a session is active.
    */
-  start(target: VoiceAgentTarget): Promise<void> {
+  start(target: VoiceAgentTarget, launch?: VoiceAgentLaunchSettings): Promise<void> {
     if (voiceAgentIsActive(this.snapshot.state)) return Promise.resolve();
     const prepared = readPreparedConnection(target.environmentId);
     const settings = readEnvironment(target.environmentId)?.serverConfig?.settings;
@@ -158,6 +159,7 @@ class VoiceAgentSession {
       // The same two values consent was bound to. The server refuses any other destination.
       endpointId: destination.endpointId,
       baseUrl: destination.baseUrl,
+      ...(launch === undefined ? {} : { launch }),
       // Always false without a grant for this destination, which the controller reports.
       hasConsent: bindVoiceAgentGrant(destination),
       getStreamUrl: ({ signal }) =>

@@ -27,8 +27,8 @@ export function ComposerVoiceModeButton(props: {
         type="button"
         size="icon-sm"
         variant="ghost"
+        // The name says what a press does, so no aria-pressed: "End voice mode, pressed" misleads.
         aria-label={name}
-        aria-pressed={active}
         // Not `disabled`: the tooltip and the click, which shows the reason, must keep working.
         aria-disabled={inert || undefined}
         data-pressed={active ? "" : undefined}

@@ -269,7 +269,12 @@ import { useManagedPolicy } from "../../state/managedPolicy";
 import { hasProviderSetup } from "./ProviderStatusBanner";
 import { type AppModelOption, getAppModelOptionsForInstance } from "../../modelSelection";
 import type { UnifiedSettings } from "@t3tools/contracts/settings";
-import { isVideoAttachment, type SessionPhase, type Thread } from "../../types";
+import {
+  DEFAULT_INTERACTION_MODE,
+  isVideoAttachment,
+  type SessionPhase,
+  type Thread,
+} from "../../types";
 import { type ComposerPromptHistoryPosition } from "./composerPromptHistory";
 import { usePendingUserInputDraft } from "./usePendingThreadRequests";
 import type { PendingApproval, PendingUserInput, TimelineEntry } from "../../session-logic";
@@ -2077,6 +2082,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     projectId: activeProjectId,
     threadId: activeThreadId,
     composer: props.voiceMode,
+    // What the composer shows, as a send from it would use.
+    launch: {
+      modelSelection: selectedModelSelection,
+      runtimeMode: compatibleRuntimeMode,
+      interactionMode: DEFAULT_INTERACTION_MODE,
+    },
   });
   const toggleVoiceModeStable = useStableCallback(voiceMode.toggle);
   const voiceModeShortcutLabel = shortcutLabelForCommand(keybindings, "composer.voiceMode", {

@@ -4,6 +4,7 @@ import { useGT } from "gt-react";
 import { XIcon } from "lucide-react";
 
 import { useComposerDraftStore } from "../../composerDraftStore";
+import { selectThreadRightPanelState, useRightPanelStore } from "../../rightPanelStore";
 import { useVoiceAgentSnapshot, voiceAgentSession } from "../../speech/voiceAgentSession";
 import { threadTakesVoiceMode, voiceModeThreadRef } from "../../speech/voiceMode.logic";
 import { useQuietThreadShell } from "../../state/entities";
@@ -41,11 +42,20 @@ export function GlobalVoiceModeIndicator(props: {
   const shownKey =
     shownTarget?.kind === "server" ? scopedThreadKey(shownTarget.threadRef) : shownDraftKey;
   const shell = useQuietThreadShell(ref);
+  // A maximized right panel shrinks the thread's chat column, banner included, to nothing.
+  const chatColumnHidden = useRightPanelStore((store) => {
+    const panel = selectThreadRightPanelState(store.byThreadKey, ref);
+    return panel.isOpen && panel.maximized === true;
+  });
   const { state } = snapshot;
   if (props.hidden || state.phase === "idle" || ref === null) return null;
   // The page shows the session's thread, and that view's composer carries the banner. A draft has
   // no shell and always has a composer; a side chat or subagent view has no banner.
-  if (scopedThreadKey(ref) === shownKey && (shell === null || threadTakesVoiceMode(shell))) {
+  if (
+    scopedThreadKey(ref) === shownKey &&
+    !chatColumnHidden &&
+    (shell === null || threadTakesVoiceMode(shell))
+  ) {
     return null;
   }
 

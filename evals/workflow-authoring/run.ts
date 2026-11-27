@@ -5,11 +5,11 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
 import * as Effect from "effect/Effect";
-import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
-import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
+import { FetchHttpClient } from "effect/http";
 
 import { proxyConfig } from "../shared/proxy.ts";
+import { postResponses } from "../shared/responses.ts";
 import { cases } from "./cases.ts";
 import { type Case, grade } from "./grade.ts";
 
@@ -45,14 +45,6 @@ const Row = Schema.Struct({
 });
 const encodeRow = Schema.encodeSync(Schema.fromJsonString(Row));
 const decodeRow = Schema.decodeUnknownSync(Schema.fromJsonString(Row));
-const decodeResponse = Schema.decodeUnknownSync(
-  Schema.fromJsonString(
-    Schema.Struct({
-      output: Schema.Array(Schema.Record(Schema.String, Schema.Unknown)),
-      usage: Schema.optional(Schema.Struct({ total_tokens: Schema.optional(Schema.Number) })),
-    }),
-  ),
-);
 
 const instructions = [
   "You write workflow definitions files for T3 Code. This is everything you know about them:",
@@ -69,29 +61,13 @@ const sample = Effect.fn("evaluateWorkflowAuthoring.sample")(function* (
   model: string,
   index: number,
 ) {
-  const client = (yield* HttpClient.HttpClient).pipe(
-    HttpClient.retryTransient({
-      retryOn: "errors-and-responses",
-      schedule: Schedule.exponential("2 seconds"),
-      times: 4,
-    }),
-  );
-  const response = yield* HttpClientRequest.post(`${proxy.url}/responses`).pipe(
-    HttpClientRequest.setHeaders(proxy.headers),
-    HttpClientRequest.bodyJson({
-      model,
-      instructions,
-      input: [{ role: "user", content: entry.task }],
-      reasoning: { effort: values.reasoning },
-      store: false,
-    }),
-    Effect.flatMap(client.execute),
-  );
-  const body = yield* response.text;
-  if (response.status !== 200) {
-    return yield* Effect.die(new Error(`Model API ${response.status}: ${body}`));
-  }
-  const decoded = decodeResponse(body);
+  const decoded = yield* postResponses(proxy, {
+    model,
+    instructions,
+    input: [{ role: "user", content: entry.task }],
+    reasoning: { effort: values.reasoning },
+    store: false,
+  });
   const reply = decoded.output
     .filter((item) => item.type === "message")
     .flatMap((item) => (item.content as Array<{ text?: string }>).map((part) => part.text ?? ""))

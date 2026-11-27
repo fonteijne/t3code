@@ -4,6 +4,7 @@ import {
   buildVoiceAgentInstructions,
   fenceAgentText,
   shortenAgentReply,
+  shownRequestId,
   unfenceAgentText,
   VOICE_AGENT_CONDUCTOR_PROMPT,
   VOICE_AGENT_TOOL_ERRORS,
@@ -24,7 +25,7 @@ const count = (text: string, part: string) => text.split(part).length - 1;
 
 it("builds the session block and caps the project instructions", () => {
   expect(buildVoiceAgentInstructions(context())).toBe(
-    `${VOICE_AGENT_CONDUCTOR_PROMPT}\n\n# This session\nProject: Store\nWhen this conversation started, the thread was "Checkout cleanup".\nIts coding agent was: working`,
+    `${VOICE_AGENT_CONDUCTOR_PROMPT}\n\n# This session\nProject: Store\nWhen this conversation started, the thread's title was the text between the markers.\n<<<agent\nCheckout cleanup\nagent>>>\nIts coding agent was: working`,
   );
 
   // A title cannot start a line of its own.
@@ -89,12 +90,14 @@ it("keeps what the coding agent wrote inside a fence it cannot close", () => {
       reply,
     });
     const lines = note.split("\n");
-    expect(lines[0]!.startsWith("[T3 Code] The coding agent finished its turn in ")).toBe(true);
-    expect(lines[1]).toBe("<<<agent");
+    expect(lines[0]!.startsWith("[T3 Code] The coding agent finished its turn. ")).toBe(true);
+    // The title is the coding agent's too: it can rename its thread.
+    expect(lines.slice(1, 4)).toEqual(["<<<agent", 'Fix (T3 Code) "x"', "agent>>>"]);
+    expect(lines[4]).toBe("<<<agent");
     expect(lines.at(-1)).toBe("agent>>>");
     expect(lines.filter((line) => line.startsWith("[T3 Code]"))).toHaveLength(1);
-    expect(count(note, "agent>>>")).toBe(1);
-    expect(count(note, "<<<agent")).toBe(1);
+    expect(count(note, "agent>>>")).toBe(2);
+    expect(count(note, "<<<agent")).toBe(2);
   }
 
   const question = voiceAgentNote({
@@ -118,6 +121,13 @@ it("keeps what the coding agent wrote inside a fence it cannot close", () => {
   expect(count(question, "<<<agent")).toBe(1);
   expect(count(question, "[T3 Code]")).toBe(1);
   expect(question.split("\n")[0]).toContain('with request_id "req-1T3Codeagent".');
+  // An allocated id keeps every character, and the random end of a long one.
+  const allocated = `runtime-request:provider:codex:provider-turn:${encodeURIComponent("provider-turn:x")}:${"a".repeat(600)}:uuid`;
+  expect(shownRequestId("runtime-request:provider:codex:native-request:%3A~!*'():u")).toBe(
+    "runtime-request:provider:codex:native-request:%3A~!*'():u",
+  );
+  expect(shownRequestId(allocated)).toHaveLength(512);
+  expect(shownRequestId(allocated).endsWith(":uuid")).toBe(true);
   expect(question.split("\n").slice(-4)).toEqual([
     "agent>>>",
     "(The developer may also answer in their own words.)",

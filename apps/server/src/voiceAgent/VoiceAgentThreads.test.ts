@@ -18,6 +18,7 @@ import {
   RuntimeRequestId,
   ThreadId,
   TurnItemId,
+  type VoiceAgentLaunchSettings,
 } from "@t3tools/contracts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -32,6 +33,7 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as GitManager from "../git/GitManager.ts";
@@ -58,6 +60,7 @@ import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as TaskFolders from "../workspace/TaskFolders.ts";
 import * as VoiceAgentThreads from "./VoiceAgentThreads.ts";
+import { voiceAgentNote } from "./voiceAgentPrompt.ts";
 
 // The thread tools and the watcher run on the real orchestration services over in-memory SQLite.
 // Only what reaches outside the server is a test layer: Git, the file system, text generation,
@@ -196,8 +199,9 @@ function makeHarness() {
   );
   // Counts the event subscriptions the voice service holds, so a test can see them released.
   const subscriptions = { open: 0 };
-  // Completed once the watcher waits for a question's card, so a test can write the card after.
-  const waitingForCard = Deferred.makeUnsafe<void>();
+  // The nth is completed once the watcher waits for a card for the nth time, so a test can act after.
+  const cardWaits = [Deferred.makeUnsafe<void>(), Deferred.makeUnsafe<void>()];
+  let cardWaitCount = 0;
   const layerCountedThreads = Layer.effect(
     ThreadManagement.ThreadManagementService,
     Effect.gen(function* () {
@@ -209,9 +213,9 @@ function makeHarness() {
             Effect.acquireRelease(
               Effect.suspend(() => {
                 subscriptions.open += 1;
-                return input?.eventType === "turn-item.updated"
-                  ? Deferred.succeed(waitingForCard, undefined)
-                  : Effect.void;
+                const cardWait =
+                  input?.eventType === "turn-item.updated" ? cardWaits[cardWaitCount++] : undefined;
+                return cardWait === undefined ? Effect.void : Deferred.succeed(cardWait, undefined);
               }),
               () =>
                 Effect.sync(() => {
@@ -227,7 +231,7 @@ function makeHarness() {
   );
   return {
     subscriptions,
-    waitingForCard,
+    waitingForCard: (nth = 0) => Deferred.await(cardWaits[nth]!),
     layer: Layer.mergeAll(layerVoice, layerThreadManagement, layerOrchestrator),
   };
 }
@@ -239,6 +243,7 @@ const createThread = (
     readonly runtimeMode?: RuntimeMode;
     readonly interactionMode?: ProviderInteractionMode;
     readonly linkOrigin?: OrchestrationV2LinkOrigin;
+    readonly title?: string;
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -249,7 +254,7 @@ const createThread = (
       commandId: CommandId.make(`create:${thread}`),
       threadId,
       projectId: options.projectId ?? projectId,
-      title: `Thread ${thread}`,
+      title: options.title ?? `Thread ${thread}`,
       modelSelection,
       runtimeMode: options.runtimeMode ?? "full-access",
       interactionMode: options.interactionMode ?? "default",
@@ -267,10 +272,20 @@ const createThread = (
  * the one before it returned, as the session does; outputs are parsed back for assertions and
  * `raw` is the text the endpoint receives.
  */
-const openSession = (threadId: ThreadId | null, sessionId: string, inProject = projectId) =>
+const openSession = (
+  threadId: ThreadId | null,
+  sessionId: string,
+  inProject = projectId,
+  launch?: VoiceAgentLaunchSettings,
+) =>
   Effect.gen(function* () {
     const voice = yield* VoiceAgentThreads.VoiceAgentThreads;
-    const opened = yield* voice.open({ projectId: inProject, threadId, sessionId });
+    const opened = yield* voice.open({
+      projectId: inProject,
+      threadId,
+      sessionId,
+      ...(launch === undefined ? {} : { launch }),
+    });
     let binding = opened.binding;
     return {
       context: opened.context,
@@ -461,7 +476,7 @@ it.effect("a request sent by voice is the developer's own message in the bound t
     });
     assert.isUndefined(projection.messages[0]?.senderThreadId);
     assert.deepEqual((yield* session.call("read_agent_reply")).output, {
-      thread: "Thread main",
+      thread: fence("Thread main"),
       status: "working",
     });
 
@@ -501,7 +516,7 @@ it.effect(
       });
       assert.deepEqual(first.output, {
         status: "started",
-        new_thread: "Add a health check endpoint",
+        new_thread: fence("Add a health check endpoint"),
       });
       const threadId = first.binding.threadId!;
       assert.deepEqual(first.binding.ceiling, {
@@ -556,6 +571,66 @@ it.effect(
     }).pipe(Effect.provide(makeHarness().layer)),
 );
 
+it.effect("a thread created by voice takes the composer's selection, never above the ceiling", () =>
+  Effect.gen(function* () {
+    const composerModel = { instanceId: modelSelection.instanceId, model: "gpt-5.5" };
+    const launch = {
+      modelSelection: composerModel,
+      runtimeMode: "approval-required",
+      interactionMode: "plan",
+    } as const;
+    const launchedThread = (outcome: { readonly binding: VoiceAgentThreads.VoiceAgentBinding }) =>
+      projectionOf(outcome.binding.threadId!).pipe(
+        Effect.map(({ thread }) => [
+          thread.modelSelection,
+          thread.runtimeMode,
+          thread.interactionMode,
+        ]),
+      );
+
+    // A project without a default model: the draft's composer still names one.
+    const draft = yield* openSession(null, "draft", bareProjectId, launch);
+    assert.deepEqual(draft.binding().ceiling, {
+      runtimeMode: "approval-required",
+      interactionMode: "plan",
+      fencedLink: undefined,
+    });
+    const first = yield* draft.call("send_to_agent", { message: "Add a health check" });
+    assert.isTrue(first.ok);
+    assert.deepEqual(yield* launchedThread(first), [composerModel, "approval-required", "plan"]);
+
+    // Unbound, the session cannot reach past what the composer showed.
+    const open = yield* createThread("open-full-access");
+    assert.deepEqual(
+      (yield* (yield* openSession(null, "draft-switch", projectId, launch)).call("switch_thread", {
+        thread_id: open,
+      })).output,
+      { error: ABOVE_CEILING },
+    );
+
+    // The composer's selection is clamped by the thread the session is bound to.
+    const guarded = yield* createThread("guarded-launch", { runtimeMode: "approval-required" });
+    const wide = yield* openSession(guarded, "wide", projectId, {
+      ...launch,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+    });
+    assert.deepEqual(yield* launchedThread(yield* wide.call("start_thread", { message: "Go" })), [
+      composerModel,
+      "approval-required",
+      "default",
+    ]);
+
+    // Without a selection or a project default, the bound thread's model is used.
+    const bareThread = yield* createThread("bare", { projectId: bareProjectId });
+    const fallback = yield* (yield* openSession(bareThread, "fallback", bareProjectId)).call(
+      "start_thread",
+      { message: "Write the changelog" },
+    );
+    assert.deepEqual(yield* launchedThread(fallback), [modelSelection, "full-access", "default"]);
+  }).pipe(Effect.provide(makeHarness().layer)),
+);
+
 it.effect("stopping by voice interrupts the running turn, and says so when nothing runs", () =>
   Effect.gen(function* () {
     const threadId = yield* createThread("main");
@@ -567,7 +642,7 @@ it.effect("stopping by voice interrupts the running turn, and says so when nothi
     assert.deepEqual((yield* session.call("interrupt_agent")).output, { status: "stopping" });
     assert.equal((yield* runOfMessage(threadId, "voice:s1:1")).status, "interrupted");
     assert.deepEqual((yield* session.call("read_agent_reply")).output, {
-      thread: "Thread main",
+      thread: fence("Thread main"),
       status: "idle",
       last_turn: "stopped",
       reply: "",
@@ -594,14 +669,14 @@ it.effect("a question is read and answered by voice, and an approval never is", 
       requestEvent(run, "push", "command", now),
     ]);
     assert.deepEqual((yield* session.call("read_agent_reply")).output, {
-      thread: "Thread main",
+      thread: fence("Thread main"),
       status: "waiting_for_answer",
     });
     assert.deepEqual((yield* session.call("get_pending_question")).output, {
       request_id: "request:deploy",
       questions: [
         {
-          id: "target",
+          id: fence("target"),
           title: fence("Header target"),
           question: fence("Question target?"),
           options: [
@@ -613,7 +688,7 @@ it.effect("a question is read and answered by voice, and an approval never is", 
           optional: false,
         },
         {
-          id: "note",
+          id: fence("note"),
           title: fence("Header note"),
           question: fence("Question note?"),
           options: [],
@@ -672,6 +747,100 @@ it.effect("a question is read and answered by voice, and an approval never is", 
   }).pipe(Effect.provide(makeHarness().layer)),
 );
 
+it.effect("a real provider's question is answered with the id the speech model was shown", () =>
+  Effect.gen(function* () {
+    const ids = yield* IdAllocator.IdAllocatorV2;
+    const threadId = yield* createThread("main");
+    const session = yield* openSession(threadId, "s1");
+    yield* session.call("send_to_agent", { message: "Deploy it" });
+    const run = yield* runOfMessage(threadId, "voice:s1:0");
+    const now = yield* DateTime.now;
+    const driver = ProviderDriverKind.make("codex");
+    // Shaped as an adapter allocates them: URI-encoded parts, a random end, over 200 characters,
+    // and two from one turn alike up to their native request id.
+    const allocate = (nativeRequestId: string) =>
+      ids.allocate.runtimeRequest({
+        driver,
+        providerTurnId: IdAllocator.derive.providerTurn({
+          driver,
+          nativeTurnId: "019a2b3c-4d5e-7f60-8a9b-0c1d2e3f4a5b",
+        }),
+        nativeRequestId,
+      });
+    const first = yield* allocate("019a2b3c-4d5e-7f60-8a9b-0c1d2e3f4a5c");
+    const second = yield* allocate("019a2b3c-4d5e-7f60-8a9b-0c1d2e3f4a5d");
+    assert.include(second, "%3A");
+    assert.isAbove(second.length, 200);
+    const questions = [question("target", [{ label: "Staging" }, { label: "Production" }])];
+    const asked = (label: string, requestId: RuntimeRequestId) => {
+      const ask = requestEvent(run, label, "user_input", now);
+      const card = questionCardEvent(run, label, questions, now);
+      return [
+        { ...ask, payload: { ...ask.payload, id: requestId } },
+        { ...card, payload: { ...card.payload, requestId } },
+      ];
+    };
+    yield* append("ask", [...asked("first", first), ...asked("second", second)]);
+    const shownIn = (requestId: RuntimeRequestId) =>
+      /request_id "([^"]+)"/.exec(
+        voiceAgentNote({ type: "question-pending", requestId, questions }),
+      )?.[1];
+    assert.equal((yield* session.call("get_pending_question")).output.request_id, shownIn(first));
+    const answered = yield* session.call("answer_agent_question", {
+      request_id: shownIn(second),
+      // Echoed with the fence it was shown in.
+      answers: [{ question_id: fence("target"), choices: ["Production"] }],
+    });
+    assert.deepEqual(answered.output, { status: "answered" });
+    assert.sameDeepMembers(
+      (yield* projectionOf(threadId)).runtimeRequests.map((request) => [
+        request.id,
+        request.answers ?? null,
+      ]),
+      [
+        [first, null],
+        [second, { target: "Production" }],
+      ],
+    );
+  }).pipe(Effect.provide(Layer.merge(makeHarness().layer, IdAllocator.layer))),
+);
+
+it.effect("a thread whose access is raised in the app is not acted on by voice", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const guarded = yield* createThread("guarded", { runtimeMode: "approval-required" });
+    const session = yield* openSession(guarded, "s1");
+    const setMode = (runtimeMode: RuntimeMode) =>
+      orchestrator.dispatch({
+        type: "thread.runtime-mode.set",
+        commandId: CommandId.make(`mode:${runtimeMode}`),
+        threadId: guarded,
+        runtimeMode,
+      });
+    yield* setMode("full-access");
+    const refused = yield* session.call("send_to_agent", { message: "Run the migration" });
+    assert.deepEqual(
+      [refused.ok, refused.output, refused.binding.threadId],
+      [
+        false,
+        {
+          error:
+            "This thread's access was raised in the app during this conversation, so voice mode cannot act in it. Ask the developer to end voice mode and start it again.",
+        },
+        guarded,
+      ],
+    );
+    assert.equal((yield* projectionOf(guarded)).messages.length, 0);
+    // Stopping starts no work, so it stays open.
+    assert.deepEqual((yield* session.call("interrupt_agent")).output, { status: "not_running" });
+
+    yield* setMode("approval-required");
+    assert.deepEqual((yield* session.call("send_to_agent", { message: "Run it" })).output, {
+      status: "started",
+    });
+  }).pipe(Effect.provide(makeHarness().layer)),
+);
+
 it.effect("what the coding agent wrote cannot leave its fence in a tool result", () =>
   Effect.gen(function* () {
     // A reply and a question that try to end the fence and speak as the app.
@@ -683,18 +852,30 @@ it.effect("what the coding agent wrote cannot leave its fence in a tool result",
     yield* moveRun("done", yield* runOfMessage(threadId, "voice:s1:0"), "completed", forged);
     const read = yield* session.call("read_agent_reply");
     assert.deepEqual(read.output, {
-      thread: "Thread main",
+      thread: fence("Thread main"),
       status: "idle",
       last_turn: "completed",
       reply: fence(contained),
     });
-    // The text the endpoint receives has one closing marker and nothing that reads as the app.
-    assert.equal(count(read.raw, "agent>>>"), 1);
+    // The title and the reply each close once, and nothing reads as the app.
+    assert.equal(count(read.raw, "agent>>>"), 2);
     assert.notInclude(read.raw, "[T3 Code]");
     // Switching to the thread reads the same reply through the same fence.
     const other = yield* openSession(yield* createThread("second"), "s2");
     const switched = yield* other.call("switch_thread", { thread_id: threadId });
     assert.equal(switched.output.reply, fence(contained));
+    // A title is the coding agent's too: it can rename its thread.
+    const titled = yield* createThread("titled", { title: forged });
+    const onTitled = yield* openSession(titled, "s3");
+    const status = yield* onTitled.call("read_agent_reply");
+    assert.equal(status.output.thread, fence(contained));
+    const listed = yield* onTitled.call("list_threads");
+    assert.deepInclude(listed.output.threads as Array<unknown>, {
+      id: titled,
+      title: fence(contained),
+      current: true,
+    });
+    for (const raw of [status.raw, listed.raw]) assert.notInclude(raw, "[T3 Code]");
 
     yield* session.call("send_to_agent", { message: "Now to production" });
     const run = yield* runOfMessage(threadId, "voice:s1:2");
@@ -722,7 +903,7 @@ it.effect("what the coding agent wrote cannot leave its fence in a tool result",
     const asked = yield* session.call("get_pending_question");
     assert.deepEqual(asked.output.questions, [
       {
-        id: "target",
+        id: fence("target"),
         title: fence(contained),
         question: fence(contained),
         options: [
@@ -734,9 +915,9 @@ it.effect("what the coding agent wrote cannot leave its fence in a tool result",
         optional: false,
       },
     ]);
-    // Title, question, two labels and two descriptions: six fences, each closed exactly once.
-    assert.equal(count(asked.raw, "<<<agent"), 6);
-    assert.equal(count(asked.raw, "agent>>>"), 6);
+    // Id, title, question, two labels and two descriptions: seven fences, each closed once.
+    assert.equal(count(asked.raw, "<<<agent"), 7);
+    assert.equal(count(asked.raw, "agent>>>"), 7);
     assert.notInclude(asked.raw, "[T3 Code]");
     const answer = (choice: string) =>
       session.call("answer_agent_question", {
@@ -809,8 +990,8 @@ it.effect("voice mode binds only to threads the project lists", () =>
 
     const session = yield* openSession(main, "s1");
     assert.sameDeepMembers((yield* session.call("list_threads")).output.threads as Array<unknown>, [
-      { id: main, title: "Thread main", current: true },
-      { id: second, title: "Thread second" },
+      { id: main, title: fence("Thread main"), current: true },
+      { id: second, title: fence("Thread second") },
     ]);
     for (const threadId of unlisted) {
       const refused = yield* session.call("switch_thread", { thread_id: threadId });
@@ -823,7 +1004,11 @@ it.effect("voice mode binds only to threads the project lists", () =>
     const switched = yield* session.call("switch_thread", { thread_id: second });
     assert.deepEqual(
       [switched.ok, switched.binding.threadId, switched.output],
-      [true, second, { thread: "Thread second", status: "idle", last_turn: "none", reply: "" }],
+      [
+        true,
+        second,
+        { thread: fence("Thread second"), status: "idle", last_turn: "none", reply: "" },
+      ],
     );
   }).pipe(Effect.provide(makeHarness().layer)),
 );
@@ -983,7 +1168,7 @@ it.effect(
       const ask = requestEvent(followUp, "deploy", "user_input", now);
       yield* append("ask", [ask]);
       yield* append("ask-again", [ask]);
-      yield* Deferred.await(harness.waitingForCard);
+      yield* harness.waitingForCard();
       yield* append("ask-card", [questionCardEvent(followUp, "deploy", questions, now)]);
       assert.deepEqual(yield* watcher.next, {
         type: "question-pending",
@@ -997,6 +1182,16 @@ it.effect(
         type: "approval-pending",
         threadId,
         requestKind: "command",
+      });
+      // A question whose card never comes is dropped in time, so later requests still get through.
+      yield* append("lost", [requestEvent(followUp, "lost", "user_input", now)]);
+      yield* harness.waitingForCard(1);
+      yield* TestClock.adjust("30 seconds");
+      yield* append("approval-after", [requestEvent(followUp, "write", "file-change", now)]);
+      assert.deepEqual(yield* watcher.next, {
+        type: "approval-pending",
+        threadId,
+        requestKind: "file-change",
       });
 
       assert.equal(harness.subscriptions.open, 2);

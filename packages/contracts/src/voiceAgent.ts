@@ -8,7 +8,9 @@ import {
   ProjectId,
   ThreadId,
 } from "./baseSchemas.ts";
+import { ModelSelection } from "./modelSelection.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
+import { ProviderInteractionMode, RuntimeMode } from "./providerPolicy.ts";
 
 export const VOICE_AGENT_STREAM_PATH = "/ws/voice-agent";
 
@@ -51,6 +53,14 @@ export const VOICE_AGENT_MAX_SESSION_MS = 30 * 60_000;
 export const VoiceAgentItemId = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256));
 export type VoiceAgentItemId = typeof VoiceAgentItemId.Type;
 
+/** What the composer showed when voice mode started: a thread the voice agent creates uses it. */
+export const VoiceAgentLaunchSettings = Schema.Struct({
+  modelSelection: ModelSelection,
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode,
+});
+export type VoiceAgentLaunchSettings = typeof VoiceAgentLaunchSettings.Type;
+
 export const VoiceAgentCommand = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("start"),
@@ -63,6 +73,8 @@ export const VoiceAgentCommand = Schema.Union([
      */
     endpointId: ProviderInstanceId,
     baseUrl: Schema.String,
+    /** The composer's selection. An unbound session never acts above its modes. */
+    launch: Schema.optionalKey(VoiceAgentLaunchSettings),
   }),
   Schema.Struct({
     type: Schema.Literal("playback-flushed"),

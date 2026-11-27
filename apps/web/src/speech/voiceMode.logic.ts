@@ -155,6 +155,29 @@ export function voiceModeFollowTarget(
   return sameThreadRef(shown, from) ? to : null;
 }
 
+/** The draft a session just left for the thread its first request created, or null. */
+export function voiceModeLeftDraft(
+  previous: VoiceAgentSessionSnapshot,
+  next: VoiceAgentSessionSnapshot,
+): ScopedThreadRef | null {
+  const draftThreadId = previous.target?.draftThreadId ?? null;
+  if (draftThreadId === null || previous.target !== next.target) return null;
+  if (previous.state.threadId !== null || next.state.threadId === null) return null;
+  return scopeThreadRef(previous.target!.environmentId, draftThreadId);
+}
+
+/**
+ * The draft an active session still sits on unbound, or null. The server binds a thread only at
+ * `start` and through the voice agent's own tools, so once that draft is sent by typing or
+ * removed, the session is attached to nothing the user can see.
+ */
+export function voiceModeUnboundDraft(snapshot: VoiceAgentSessionSnapshot): ScopedThreadRef | null {
+  const { state, target } = snapshot;
+  if (target === null || target.draftThreadId === null) return null;
+  if (!voiceAgentIsActive(state) || state.threadId !== null) return null;
+  return scopeThreadRef(target.environmentId, target.draftThreadId);
+}
+
 /**
  * What a screen reader hears for a change, or null. Never a turn-taking change: the voice agent is
  * already audible, and a screen reader speaking over it would reach the open microphone.

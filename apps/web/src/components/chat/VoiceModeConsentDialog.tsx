@@ -44,13 +44,13 @@ export function VoiceModeConsentDialog(props: {
           </DialogDescription>
         </DialogHeader>
         <DialogPanel>
-          <p>
+          <p className="text-muted-foreground text-sm">
             <T>
               The endpoint also receives the agent instructions of every project you use voice mode
               in, the titles of the threads you talk to, and what their coding agents reply and ask.
             </T>
           </p>
-          <p className="text-sm text-muted-foreground">
+          <p className="text-muted-foreground text-sm">
             <T>This choice is saved on this device, and you can revoke it in Voice settings.</T>
           </p>
         </DialogPanel>
