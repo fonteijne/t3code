@@ -45,6 +45,7 @@ export function LabsSettingsPanel() {
         <WorkflowsRow />
         <WorkflowSkippedRunsRow />
         <PromptSuggestionsRow />
+        <VoiceModeRow />
         <SimlockHostsRow />
         <FastWorktreeCheckoutRow />
         <AgentFeedbackRow />
@@ -352,6 +353,42 @@ function SimlockHostsRow() {
             updateSettings({ simlockDeviceHostsEnabled: Boolean(checked) })
           }
           aria-label={gt("Simlock device hosts")}
+        />
+      }
+    />
+  );
+}
+
+/** Shows only when every machine in scope can run it; older servers drop the setting. */
+function VoiceModeRow() {
+  const searchableSetting = useSearchableSetting();
+  const { scope, connectedEnvironments } = useSettingsScope();
+  const settings = useScopedSettings();
+  const updateSettings = useUpdateScopedSettings();
+  const gt = useGT();
+  if (
+    scope.kind === "project" ||
+    scope.kind === "checkout" ||
+    connectedEnvironments.length === 0 ||
+    connectedEnvironments.some(
+      (environment) => environment.serverConfig?.environment.capabilities.voiceMode !== true,
+    )
+  )
+    return null;
+  return (
+    <SettingsRow
+      serverScoped
+      {...searchableSetting("voice-mode-beta")}
+      settingKeys={["voiceModeEnabled"]}
+      description={gt(
+        "Talk to a voice agent that passes your requests to the thread's coding agent and tells you what it answered.",
+      )}
+      control={
+        <ScopedSwitch
+          settingKeys={["voiceModeEnabled"]}
+          checked={settings.voiceModeEnabled}
+          onCheckedChange={(checked) => updateSettings({ voiceModeEnabled: Boolean(checked) })}
+          aria-label={gt("Voice mode")}
         />
       }
     />

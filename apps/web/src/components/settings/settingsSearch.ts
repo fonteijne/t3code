@@ -73,6 +73,7 @@ export interface SettingsSearchItem {
   readonly peerLinksOnly?: boolean;
   readonly fastWorktreeCheckoutOnly?: boolean;
   readonly agentFeedbackOnly?: boolean;
+  readonly voiceModeOnly?: boolean;
   readonly textGeneratorsOnly?: boolean;
   readonly secondary?: boolean;
   readonly requiresThreadAutoSettlement?: boolean;
@@ -90,6 +91,7 @@ export interface SettingsSearchAvailability {
   readonly hasPeerLinkHost?: boolean;
   readonly hasFastWorktreeCheckoutEnvironment?: boolean;
   readonly hasAgentFeedbackEnvironment?: boolean;
+  readonly hasVoiceModeEnvironment?: boolean;
   /** An environment without a provider allow-list, which hides text generators. */
   readonly hasTextGeneratorsEnvironment?: boolean;
   readonly hasPrimaryEnvironment?: boolean;
@@ -589,6 +591,16 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: [msg("beta tab autocomplete predict next message claude codex ghost text")],
   },
   {
+    id: "voice-mode-beta",
+    title: msg("Voice mode"),
+    to: "/settings/labs",
+    scope: "environment",
+    voiceModeOnly: true,
+    searchTerms: [
+      msg("beta voice mode realtime speech talk conversation agent microphone hands free"),
+    ],
+  },
+  {
     id: "simlock-hosts",
     title: msg("Simlock device hosts (alpha)"),
     to: "/settings/labs",
@@ -647,6 +659,14 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: [
       msg("speech voice transcription vocabulary shared dictionary team environment glossary"),
     ],
+  },
+  {
+    id: "voice-agent",
+    title: msg("Voice agent"),
+    to: "/settings/voice",
+    scope: "project-defaults",
+    voiceModeOnly: true,
+    searchTerms: [msg("voice mode realtime speech endpoint voice model talk default project")],
   },
   {
     id: "speech-post-processing-model",
@@ -1112,6 +1132,7 @@ export const SETTINGS_SEARCH_ITEMS = [
       msg(
         "model api api key openai openrouter anthropic ollama lm studio custom endpoint base url thread titles commit messages",
       ),
+      msg("voice mode voice model realtime speech"),
     ],
     providerSettingsOnly: true,
     textGeneratorsOnly: true,
@@ -1692,6 +1713,7 @@ export function filterAvailableSettingsSearchItems(
       (!item.fastWorktreeCheckoutOnly ||
         availability.hasFastWorktreeCheckoutEnvironment === true) &&
       (!item.agentFeedbackOnly || availability.hasAgentFeedbackEnvironment === true) &&
+      (!item.voiceModeOnly || availability.hasVoiceModeEnvironment === true) &&
       (!item.textGeneratorsOnly || availability.hasTextGeneratorsEnvironment === true) &&
       (!item.secretProvidersOnly || availability.hasSecretProvidersEnvironment === true),
   );

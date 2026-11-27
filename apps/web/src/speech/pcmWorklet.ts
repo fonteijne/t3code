@@ -1,4 +1,4 @@
-import { PcmResampler } from "./pcmResampler";
+import { floatToPcm16, PcmResampler } from "./pcmResampler";
 
 declare const sampleRate: number;
 declare class AudioWorkletProcessor {
@@ -6,9 +6,17 @@ declare class AudioWorkletProcessor {
 }
 declare function registerProcessor(name: string, processor: typeof AudioWorkletProcessor): void;
 
+type CaptureOptions = {
+  readonly meterOnly?: boolean;
+  /** Voice mode: Int16 frames at this rate and no five-minute limit. Absent is dictation. */
+  readonly pcm16?: { readonly sampleRate: number; readonly frameSamples: number };
+};
+
 class PcmCaptureProcessor extends AudioWorkletProcessor {
-  private readonly resampler = new PcmResampler(sampleRate);
-  private chunk = new Float32Array(8_000);
+  private readonly resampler: PcmResampler;
+  private readonly chunk: Float32Array;
+  private readonly sampleLimit: number;
+  private readonly pcm16: boolean;
   private length = 0;
   private recording = false;
   private flushed = false;
@@ -18,9 +26,14 @@ class PcmCaptureProcessor extends AudioWorkletProcessor {
   private level = 0;
   private readonly meterOnly: boolean;
 
-  constructor(options?: { readonly processorOptions?: { readonly meterOnly?: boolean } }) {
+  constructor(options?: { readonly processorOptions?: CaptureOptions }) {
     super();
+    const pcm16 = options?.processorOptions?.pcm16;
     this.meterOnly = options?.processorOptions?.meterOnly === true;
+    this.pcm16 = pcm16 !== undefined;
+    this.resampler = new PcmResampler(sampleRate, pcm16?.sampleRate);
+    this.chunk = new Float32Array(pcm16?.frameSamples ?? 8_000);
+    this.sampleLimit = pcm16 ? Number.POSITIVE_INFINITY : 16_000 * 300;
     this.port.onmessage = ({ data }) => {
       if (data === "start") this.recording = true;
       if (data === "stop") {
@@ -35,14 +48,16 @@ class PcmCaptureProcessor extends AudioWorkletProcessor {
   }
 
   private publish() {
-    const pcm = this.chunk.slice(0, this.length);
+    const pcm = this.pcm16
+      ? floatToPcm16(this.chunk, this.length)
+      : this.chunk.slice(0, this.length);
     this.port.postMessage(pcm, [pcm.buffer]);
     this.length = 0;
   }
 
   private append(pcm: Float32Array) {
     for (const sample of pcm) {
-      if (this.samples === 16_000 * 300) {
+      if (this.samples === this.sampleLimit) {
         this.recording = false;
         // oxlint-disable-next-line unicorn/require-post-message-target-origin -- AudioWorklet MessagePorts do not accept a target origin
         this.port.postMessage("limit");

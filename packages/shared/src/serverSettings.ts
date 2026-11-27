@@ -22,6 +22,7 @@ import {
   type ServerProvider,
   ServerSettings,
   type ServerSettingsPatch,
+  type TextGeneratorConfig,
   withIdleCompaction,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
@@ -248,6 +249,25 @@ function mergeSettingsEntries<Value>(
     }
   }
   return Object.fromEntries(next);
+}
+
+// Older clients replace a whole entry and do not know voiceModel: an absent key keeps the saved
+// one. An empty string clears it.
+function mergeTextGenerators(
+  current: ServerSettings["textGenerators"],
+  patch: NonNullable<ServerSettingsPatch["textGenerators"]>,
+): ServerSettings["textGenerators"] {
+  const next = new Map<string, TextGeneratorConfig>(Object.entries(current));
+  for (const [id, config] of Object.entries(patch)) {
+    if (config === null) {
+      next.delete(id);
+      continue;
+    }
+    const { voiceModel: patched, ...rest } = config;
+    const voiceModel = patched ?? current[id as ProviderInstanceId]?.voiceModel;
+    next.set(id, voiceModel ? { ...rest, voiceModel } : rest);
+  }
+  return Object.fromEntries(next) as ServerSettings["textGenerators"];
 }
 
 // Secret persistence keys tokens by trimmed, lowercased host, so merge on the same key.
@@ -621,7 +641,7 @@ export function applyServerSettingsPatch(
         }
       : {}),
     ...(textGeneratorsPatch !== undefined
-      ? { textGenerators: mergeSettingsEntries(current.textGenerators, textGeneratorsPatch) }
+      ? { textGenerators: mergeTextGenerators(current.textGenerators, textGeneratorsPatch) }
       : {}),
     ...(secretProvidersPatch !== undefined
       ? { secretProviders: mergeSettingsEntries(current.secretProviders, secretProvidersPatch) }

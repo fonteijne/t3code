@@ -36,6 +36,7 @@ import { useEnvironmentScope, usePreparedConnection } from "../state/session";
 import { useAppleSpeechLocales } from "./appleSpeech";
 import { preferredSpeechLanguages } from "./preferredSpeechLanguages";
 import { runEnvironmentSpeech } from "./runEnvironmentSpeech";
+import { useVoiceAgentActive } from "./voiceAgentSession";
 import { useAudioChoice } from "./voiceConsent";
 import {
   IDLE_VOICE_STATE,
@@ -213,8 +214,9 @@ export function useEnvironmentSpeechInput(input: HookInput) {
   const owns = snapshot.target?.ownerKey === input.ownerKey;
   const activity = useVoiceInputSessionActivity(session, input.ownerKey);
   const state = owns ? snapshot.state : IDLE_VOICE_STATE;
-  // One microphone: another draft's recording leaves this editor without voice input until it ends.
-  const busyElsewhere = !owns && voiceInputBlocksSubmission(snapshot.state);
+  const voiceAgentActive = useVoiceAgentActive();
+  // One microphone: another draft's recording, or voice mode, leaves this editor without voice input.
+  const busyElsewhere = (!owns && voiceInputBlocksSubmission(snapshot.state)) || voiceAgentActive;
 
   const startRequestRef = useRef(0);
   const latestRef = useRef({ input, clientSettings, cleanupPrepared, projectWords, session });

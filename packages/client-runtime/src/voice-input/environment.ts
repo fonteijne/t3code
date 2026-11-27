@@ -160,7 +160,8 @@ export const transcribeCloudPcm = (
   );
 };
 
-export const getEnvironmentSpeechStreamUrl = (prepared: PreparedConnection) => {
+/** A media WebSocket URL on the environment, carrying a fresh short-lived ticket. */
+export const getEnvironmentMediaSocketUrl = (prepared: PreparedConnection, path: string) => {
   let endpoint = prepared.httpBaseUrl;
   return request({
     group: "auth",
@@ -173,13 +174,16 @@ export const getEnvironmentSpeechStreamUrl = (prepared: PreparedConnection) => {
     run: ({ client, headers }) => client.webSocketTicketFor({ headers, params: { use: "media" } }),
   }).pipe(
     Effect.map(({ ticket }) => {
-      const url = new URL(SPEECH_STREAM_PATH, endpoint);
+      const url = new URL(path, endpoint);
       url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
       url.searchParams.set("wsTicket", Redacted.value(ticket));
       return url.toString();
     }),
   );
 };
+
+export const getEnvironmentSpeechStreamUrl = (prepared: PreparedConnection) =>
+  getEnvironmentMediaSocketUrl(prepared, SPEECH_STREAM_PATH);
 
 export const getEnvironmentSpeechModels = (
   prepared: PreparedConnection,

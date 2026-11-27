@@ -1005,6 +1005,12 @@ export const TextGeneratorConfig = Schema.Struct({
   baseUrl: TextGeneratorBaseUrl,
   apiKey: SettingsSecretValue.pipe(Schema.withDecodingDefault(Effect.succeed("")), secretSetting),
   enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  /**
+   * The realtime speech model voice mode opens on this endpoint, as listed by it or typed in.
+   * Read only for `openaiCompatible`. Absent or empty means none. In a settings patch an absent
+   * key keeps the saved value, because older clients replace the entry without it.
+   */
+  voiceModel: Schema.optionalKey(TrimmedString),
 });
 export type TextGeneratorConfig = typeof TextGeneratorConfig.Type;
 
@@ -1236,6 +1242,7 @@ export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "continueThreadsAfterServerUpdate",
   "responseStreamingMode",
   "speechProjectCustomWords",
+  "voiceAgentEndpoint",
 ] as const;
 export type ProjectScopedServerSettingKey = (typeof PROJECT_SCOPED_SERVER_SETTING_KEYS)[number];
 
@@ -1274,6 +1281,7 @@ export const ProjectSettingsOverrides = Schema.Struct({
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
   speechProjectCustomWords: Schema.optionalKey(SpeechCustomWords),
+  voiceAgentEndpoint: Schema.optionalKey(ProviderInstanceId),
   providerInstances: Schema.optionalKey(
     Schema.Record(ProviderInstanceId, ProjectProviderInstanceOverride),
   ),
@@ -1459,6 +1467,15 @@ export const ServerSettings = Schema.Struct({
   speechProjectCustomWords: SpeechCustomWords.pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   // Null follows textGenerationModelSelection; a selection pins transcript cleanup to its own model.
   speechPostProcessingModelSelection: Schema.NullOr(ModelSelection).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  /** Labs pilot: realtime voice mode. Off refuses voice sessions and clients hide the entry points. */
+  voiceModeEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /**
+   * The text generator voice mode talks to (its `voiceModel`). Null uses the only enabled
+   * OpenAI-compatible text generator that has a voice model.
+   */
+  voiceAgentEndpoint: Schema.NullOr(ProviderInstanceId).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   projectAgentBrowserAccessOverrides: Schema.Record(ProjectId, Schema.Boolean).pipe(
@@ -1927,6 +1944,8 @@ export const ServerSettingsPatch = Schema.Struct({
   speechModelUnloadTimeout: Schema.optionalKey(SpeechModelUnloadTimeout),
   speechProjectCustomWords: Schema.optionalKey(SpeechCustomWords),
   speechPostProcessingModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
+  voiceModeEnabled: Schema.optionalKey(Schema.Boolean),
+  voiceAgentEndpoint: Schema.optionalKey(Schema.NullOr(ProviderInstanceId)),
   projectAgentBrowserAccessOverrides: Schema.optionalKey(
     Schema.Record(ProjectId, Schema.NullOr(Schema.Boolean)),
   ),

@@ -1,8 +1,15 @@
 export async function requestMicrophone(
   microphoneId: string,
   signal?: AbortSignal,
+  processing?: MediaTrackConstraints,
 ): Promise<MediaStream> {
-  const constraints = { audio: microphoneId ? { deviceId: { exact: microphoneId } } : true };
+  const audio = (deviceId?: ConstrainDOMString): MediaTrackConstraints | true =>
+    processing
+      ? { ...processing, ...(deviceId ? { deviceId } : {}) }
+      : deviceId
+        ? { deviceId }
+        : true;
+  const constraints = { audio: audio(microphoneId ? { exact: microphoneId } : undefined) };
   const open = async () => {
     let stream: MediaStream;
     try {
@@ -12,7 +19,7 @@ export async function requestMicrophone(
       if (!microphoneId || (name !== "OverconstrainedError" && name !== "NotFoundError"))
         throw error;
       signal?.throwIfAborted();
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream = await navigator.mediaDevices.getUserMedia({ audio: audio() });
     }
     if (signal?.aborted) {
       stream.getTracks().forEach((track) => track.stop());

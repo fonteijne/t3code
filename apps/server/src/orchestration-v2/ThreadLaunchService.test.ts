@@ -155,6 +155,8 @@ interface HarnessOptions {
   readonly getLaunchSettings?: ServerSettings.ServerSettingsService["Service"]["getSettings"];
   readonly providers?: ReadonlyArray<ServerProvider>;
   readonly git?: Partial<GitWorkflow.GitWorkflowService["Service"]>;
+  /** Defaults to a driver no launch may reach; `defaultWorkspaceStrategy` reads HEAD through it. */
+  readonly gitDriver?: GitVcsDriver.GitVcsDriver["Service"];
   readonly dispatch?: (
     command: Parameters<ThreadManagement.ThreadManagementService["Service"]["dispatch"]>[0],
     dispatch: ThreadManagement.ThreadManagementService["Service"]["dispatch"],
@@ -252,6 +254,9 @@ function makeHarness(options: HarnessOptions = {}) {
       deleteLocalBranch,
       ...options.git,
     }),
+    options.gitDriver === undefined
+      ? Layer.mock(GitVcsDriver.GitVcsDriver)({})
+      : Layer.succeed(GitVcsDriver.GitVcsDriver, options.gitDriver),
     Layer.succeed(ProjectSetupScriptRunner.ProjectSetupScriptRunner, {
       runForThread: runSetup,
     }),
@@ -2810,6 +2815,7 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
             ),
           ),
         checkWorktreeBase: launches.checkWorktreeBase,
+        defaultWorkspaceStrategy: launches.defaultWorkspaceStrategy,
         isNonGitProject: launches.isNonGitProject,
         retryPreparation: launches.retryPreparation,
         prepareRun: launches.prepareRun,
@@ -4183,6 +4189,73 @@ it.effect.each([
       );
     }).pipe(Effect.provide(harness.layer));
   }),
+);
+
+it.effect(
+  "a thread nobody placed starts in a worktree only when the project and its HEAD allow",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const git = yield* GitVcsDriver.GitVcsDriver;
+      const harness = makeHarness({ gitDriver: git });
+      const commit = ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-m"];
+      const worktree = { type: "worktree", baseRef: "main", startFromOrigin: true };
+      yield* Effect.gen(function* () {
+        const launches = yield* ThreadLaunch.ThreadLaunchService;
+        const cases: ReadonlyArray<readonly [string, "worktree" | "local" | null, unknown]> = [
+          ["on a branch", "worktree", worktree],
+          // The composer falls back to the project's t3.json when no setting picks the mode.
+          ["t3.json asks for worktrees", null, worktree],
+          ["t3.json asks for worktrees", "local", { type: "root" }],
+          ["on a branch", null, { type: "root" }],
+          ["not a repository", "worktree", { type: "root" }],
+          ["no commit yet", "worktree", { type: "root" }],
+          ["detached HEAD", "worktree", { type: "root" }],
+          ["branch tip object missing", "worktree", worktree],
+          ["git refuses the repository", "worktree", "ThreadLaunchBranchUnreadableError"],
+        ];
+        for (const [checkout, setting, expected] of cases) {
+          const repo = yield* fs.makeTempDirectoryScoped({ prefix: "launch-default-workspace-" });
+          const run = (args: ReadonlyArray<string>) =>
+            git.execute({ operation: "launch-test", cwd: repo, args });
+          if (checkout !== "not a repository") yield* run(["init", "-b", "main"]);
+          if (checkout === "branch tip object missing")
+            yield* fs.writeFileString(`${repo}/.git/refs/heads/main`, `${"1".repeat(40)}\n`);
+          else if (checkout !== "not a repository" && checkout !== "no commit yet")
+            yield* run([...commit, "init"]);
+          if (checkout === "detached HEAD") yield* run(["checkout", "--detach"]);
+          if (checkout === "t3.json asks for worktrees")
+            yield* fs.writeFileString(
+              `${repo}/t3.json`,
+              JSON.stringify({ defaultThreadEnvMode: "worktree" }),
+            );
+          if (checkout === "git refuses the repository") {
+            // Git quotes the broken file's path in its refusal; that path must not read as "not a repository".
+            yield* fs.writeFileString(`${repo}/not a git repository`, "[core\n");
+            yield* fs.writeFileString(
+              `${repo}/.git/config`,
+              `[include]\n\tpath = ${repo}/not a git repository\n`,
+            );
+          }
+          const strategy = yield* launches
+            .defaultWorkspaceStrategy({
+              workspaceRoot: repo,
+              settings: { defaultThreadEnvMode: setting, newWorktreesStartFromOrigin: true },
+            })
+            .pipe(Effect.catch((error) => Effect.succeed<unknown>(error._tag)));
+          assert.deepEqual<unknown>(strategy, expected, `${checkout}, setting ${setting}`);
+        }
+      }).pipe(Effect.provide(harness.layer));
+    }).pipe(
+      Effect.provide(
+        GitVcsDriver.layer.pipe(
+          Layer.provide(
+            ServerConfig.layerTest(process.cwd(), { prefix: "launch-default-workspace-" }),
+          ),
+          Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+        ),
+      ),
+    ),
 );
 
 it.effect("refuses a new worktree whose explicit branch already exists", () =>

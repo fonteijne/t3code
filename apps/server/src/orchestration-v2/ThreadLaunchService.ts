@@ -1,7 +1,11 @@
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
-import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
+import {
+  resolveProjectFileBackedSetting,
+  resolveProjectSettings,
+} from "@t3tools/shared/projectSettings";
+import { parseT3ProjectFile } from "@t3tools/shared/t3ProjectFile";
 import {
   CommandId,
   type ChatAttachment,
@@ -13,6 +17,7 @@ import {
   type OrchestrationV2WorkflowOrigin,
   type OrchestrationV2LinkOrigin,
   type OrchestrationV2ProviderThreadNativeMetadata,
+  type OrchestrationV2ThreadLaunchWorkspaceStrategy,
   type OrchestrationV2ThreadProjection,
   type ProviderDriverKind,
   type ProviderInteractionMode,
@@ -20,6 +25,8 @@ import {
   type RunId,
   type RuntimeMode,
   type ScheduledTaskId,
+  type ServerSettings as ServerSettingsValue,
+  T3_PROJECT_FILE_NAME,
   type GitCommandError,
   type GitManagerServiceError,
   TaskFolderError,
@@ -52,7 +59,7 @@ import {
 
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as GitWorkflow from "../git/GitWorkflowService.ts";
-import type * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { parseGitCloneProgressLine } from "../project/gitCloneProgress.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
@@ -237,6 +244,19 @@ export class ThreadLaunchNotRepositoryError extends Schema.TaggedError<ThreadLau
   }
 }
 
+export class ThreadLaunchBranchUnreadableError extends Schema.TaggedError<ThreadLaunchBranchUnreadableError>()(
+  "ThreadLaunchBranchUnreadableError",
+  { workspaceRoot: Schema.String },
+) {
+  override get message(): string {
+    return "Could not read the project's current branch for the new worktree.";
+  }
+}
+
+// Anchored to the fatal line: other diagnostics, such as a dubious-ownership refusal, quote the path.
+const NON_REPOSITORY_FATAL =
+  /^fatal: (?:not a git repository|gitfile does not point to a valid repository)/im;
+
 export class ThreadLaunchService extends Context.Service<
   ThreadLaunchService,
   {
@@ -259,6 +279,22 @@ export class ThreadLaunchService extends Context.Service<
       | ThreadLaunchBranchConflictError
       | ThreadLaunchNotRepositoryError
       | TaskFolderError
+    >;
+    /**
+     * Where a thread starts when nobody chose: a new worktree off the checkout's current branch
+     * when the project's settings or its t3.json say so, else the project folder. A checkout with
+     * no commit or a detached HEAD stays in the project folder.
+     */
+    readonly defaultWorkspaceStrategy: (input: {
+      readonly workspaceRoot: string;
+      /** The project's resolved settings; a null mode falls back to the project's t3.json. */
+      readonly settings: Pick<
+        ServerSettingsValue,
+        "defaultThreadEnvMode" | "newWorktreesStartFromOrigin"
+      >;
+    }) => Effect.Effect<
+      OrchestrationV2ThreadLaunchWorkspaceStrategy,
+      ThreadLaunchBranchUnreadableError
     >;
     /** True only when the project's folder is known not to be a Git repository. */
     readonly isNonGitProject: (projectId: ProjectId) => Effect.Effect<boolean>;
@@ -290,6 +326,7 @@ const make = Effect.gen(function* () {
   const cloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
   const terminals = yield* TerminalManager.TerminalManager;
   const git = yield* GitWorkflow.GitWorkflowService;
+  const gitDriver = yield* GitVcsDriver.GitVcsDriver;
   const checkpointStore = yield* CheckpointStore.CheckpointStore;
   const setupScripts = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
@@ -527,6 +564,56 @@ const make = Effect.gen(function* () {
         conflictingBranch,
       });
   });
+
+  const defaultWorkspaceStrategy: ThreadLaunchService["Service"]["defaultWorkspaceStrategy"] =
+    Effect.fn("ThreadLaunchService.defaultWorkspaceStrategy")(function* (input) {
+      const { workspaceRoot, settings } = input;
+      // The composer falls back to the project's t3.json when no setting picks the mode.
+      const mode =
+        settings.defaultThreadEnvMode ??
+        resolveProjectFileBackedSetting(
+          "defaultThreadEnvMode",
+          null,
+          yield* fileSystem.readFileString(`${workspaceRoot}/${T3_PROJECT_FILE_NAME}`).pipe(
+            Effect.map(parseT3ProjectFile),
+            Effect.orElseSucceed(() => null),
+          ),
+        ).value;
+      if (mode !== "worktree") return { type: "root" as const };
+      const unreadable = new ThreadLaunchBranchUnreadableError({ workspaceRoot });
+      const commit = yield* gitDriver
+        .execute({
+          operation: "ThreadLaunchService.defaultWorkspaceStrategy",
+          cwd: workspaceRoot,
+          // Not peeled: a branch whose tip object is missing still resolves, so only an unborn HEAD exits 1.
+          args: ["rev-parse", "--verify", "--quiet", "HEAD"],
+          allowNonZeroExit: true,
+          timeoutMs: 5_000,
+        })
+        .pipe(Effect.orElseSucceed(() => null));
+      // Only Git saying "no commit yet" (exit 1) or "not a repository" keeps the launch shared.
+      if (commit?.exitCode === 1 || (commit !== null && NON_REPOSITORY_FATAL.test(commit.stderr)))
+        return { type: "root" as const };
+      if (commit?.exitCode !== 0) return yield* unreadable;
+      // symbolic-ref skips the index, so a held index lock cannot drop the launch into the shared checkout.
+      const head = yield* gitDriver
+        .execute({
+          operation: "ThreadLaunchService.defaultWorkspaceStrategy",
+          cwd: workspaceRoot,
+          args: ["symbolic-ref", "--quiet", "--short", "HEAD"],
+          allowNonZeroExit: true,
+          timeoutMs: 5_000,
+        })
+        .pipe(Effect.orElseSucceed(() => null));
+      if (head?.exitCode === 1) return { type: "root" as const };
+      const branch = head?.exitCode === 0 ? head.stdout.trim() : "";
+      if (branch.length === 0) return yield* unreadable;
+      return {
+        type: "worktree" as const,
+        baseRef: branch,
+        startFromOrigin: settings.newWorktreesStartFromOrigin,
+      };
+    });
 
   const isNonGitProject: ThreadLaunchService["Service"]["isNonGitProject"] = Effect.fn(
     "ThreadLaunchService.isNonGitProject",
@@ -1843,6 +1930,7 @@ const make = Effect.gen(function* () {
   return ThreadLaunchService.of({
     launch,
     checkWorktreeBase,
+    defaultWorkspaceStrategy,
     isNonGitProject,
     retryPreparation,
     prepareRun,

@@ -243,6 +243,16 @@ export class GitManager extends Context.Service<
       never,
       Scope.Scope
     >;
+    /**
+     * The text of an instruction file at the top of `cwd`, or "" when it is missing, larger than
+     * `maxBytes`, not a file, or resolves outside `cwd` (a symlink must not pull in another folder).
+     */
+    readonly readRepositoryInstructions: (
+      cwd: string,
+      fileName: string,
+      /** Defaults to 20 000: text generation skips a larger file. */
+      maxBytes?: number,
+    ) => Effect.Effect<string>;
   }
 >()("t3/git/GitManager") {}
 
@@ -1056,7 +1066,7 @@ export const make = Effect.gen(function* () {
   });
 
   const readRepositoryInstructions = Effect.fn("GitManager.readRepositoryInstructions")(
-    function* (cwd: string, fileName: string) {
+    function* (cwd: string, fileName: string, maxBytes = 20_000) {
       const root = yield* fileSystem.realPath(cwd);
       const instructionPath = yield* fileSystem.realPath(path.join(root, fileName));
       const relative = path.relative(root, instructionPath);
@@ -1064,7 +1074,7 @@ export const make = Effect.gen(function* () {
         return "";
       }
       const info = yield* fileSystem.stat(instructionPath);
-      if (info.type !== "File" || info.size > ByteSize.bytes(20_000)) {
+      if (info.type !== "File" || info.size > ByteSize.bytes(maxBytes)) {
         return "";
       }
       return (yield* fileSystem.readFileString(instructionPath)).trim();
@@ -4428,6 +4438,7 @@ export const make = Effect.gen(function* () {
     subscribePullRequestStateChanges: PubSub.subscribe(pullRequestStateChanges).pipe(
       Effect.map((subscription) => Stream.fromSubscription(subscription)),
     ),
+    readRepositoryInstructions,
   });
 });
 

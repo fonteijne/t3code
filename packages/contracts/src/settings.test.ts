@@ -15,6 +15,7 @@ import {
   DEFAULT_SERVER_SETTINGS,
   globalIdleCompaction,
   idleCompactionPatch,
+  isNullableProjectSettingsOverride,
   PROJECT_SCOPED_SERVER_SETTING_KEYS,
   requiredScopesForProjectMutation,
   resolveIdleCompaction,
@@ -541,6 +542,20 @@ describe("voice settings", () => {
     expect(() => decodeClientSettingsPatch({ speechCorrectionWord: "x".repeat(51) })).toThrow();
     expect(DEFAULT_SERVER_SETTINGS.speechProjectCustomWords).toEqual([]);
     expect(PROJECT_SCOPED_SERVER_SETTING_KEYS).toContain("speechProjectCustomWords");
+  });
+
+  it("keeps voice mode off and unconfigured until someone sets it up", () => {
+    expect(DEFAULT_SERVER_SETTINGS.voiceModeEnabled).toBe(false);
+    expect(DEFAULT_SERVER_SETTINGS.voiceAgentEndpoint).toBeNull();
+    expect(PROJECT_SCOPED_SERVER_SETTING_KEYS).toContain("voiceAgentEndpoint");
+    expect(isNullableProjectSettingsOverride("voiceAgentEndpoint")).toBe(false);
+    // An entry saved before voice mode, and the same entry as an older client sends it back.
+    const entry = { kind: "openaiCompatible", baseUrl: "https://gateway.test/v1" };
+    const gateway = ProviderInstanceId.make("gateway");
+    const stored = decodeServerSettings({ textGenerators: { gateway: entry } });
+    expect(stored.textGenerators[gateway]).not.toHaveProperty("voiceModel");
+    const patch = decodeServerSettingsPatch({ textGenerators: { gateway: entry } });
+    expect(patch.textGenerators?.[gateway]).not.toHaveProperty("voiceModel");
   });
 });
 

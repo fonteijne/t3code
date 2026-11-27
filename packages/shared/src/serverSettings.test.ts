@@ -9,6 +9,7 @@ import {
   ServerSettingsPatch,
   UsageLimitSourceId,
   type ServerProvider,
+  type TextGeneratorConfig,
 } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
 import * as Schema from "effect/Schema";
@@ -466,6 +467,34 @@ describe("serverSettings helpers", () => {
     expect(resolveSpeechPostProcessingModelSelection(off, [])).toBe(
       off.textGenerationModelSelection,
     );
+  });
+
+  it("keeps a text generator's voice model when an older client replaces the entry", () => {
+    const generatorId = ProviderInstanceId.make("gateway");
+    const entry = {
+      kind: "openaiCompatible" as const,
+      baseUrl: "https://gateway.test/v1",
+      apiKey: "",
+      enabled: true,
+    };
+    const saved = {
+      ...DEFAULT_SERVER_SETTINGS,
+      textGenerators: { [generatorId]: { ...entry, voiceModel: "m" } },
+    };
+    const patched = (config: TextGeneratorConfig | null) =>
+      applyServerSettingsPatch(saved, { textGenerators: { [generatorId]: config } }).textGenerators[
+        generatorId
+      ];
+
+    // An older client toggling the entry does not know the key.
+    expect(patched({ ...entry, enabled: false })).toEqual({
+      ...entry,
+      enabled: false,
+      voiceModel: "m",
+    });
+    expect(patched({ ...entry, voiceModel: "n" })).toEqual({ ...entry, voiceModel: "n" });
+    expect(patched({ ...entry, voiceModel: "" })).toEqual(entry);
+    expect(patched(null)).toBeUndefined();
   });
 
   it("falls back from a writer provider a project turned off, keeping it for other projects", () => {

@@ -151,7 +151,13 @@ import { attachmentUploadBlockReason } from "../../lib/attachmentUploadState";
 import { useDictationShortcut } from "../../speech/useDictationShortcut";
 import { useDictationSubmissionShortcut } from "../../speech/useDictationSubmissionShortcut";
 import { useEnvironmentSpeechInput } from "../../speech/useEnvironmentSpeechInput";
+import { useComposerVoiceMode } from "../../speech/useComposerVoiceMode";
+import { voiceAgentSession } from "../../speech/voiceAgentSession";
+import type { ComposerVoiceModeInput } from "../../speech/voiceMode.logic";
 import { ComposerSpeechButton, ComposerSpeechRecordingPill } from "./ComposerSpeechButton";
+import { ComposerVoiceModeButton } from "./ComposerVoiceModeButton";
+import { VOICE_MODE_BANNER_ID } from "./VoiceModeBanner";
+import { VoiceModeConsentDialog } from "./VoiceModeConsentDialog";
 import type { AssistantCitationSourceAnchor } from "~/lib/assistantTextSelection";
 import { shortcutLabelForCommand, type ShortcutMatchContext } from "../../keybindings";
 import {
@@ -340,6 +346,8 @@ export interface ChatComposerHandle {
   stepReasoningEffort: (direction: 1 | -1) => void;
   toggleModelPicker: () => void;
   openControl: (command: KeybindingCommand) => void;
+  /** Starts or ends voice mode for this composer. False where it has no entry point. */
+  toggleVoiceMode: () => boolean;
   isModelPickerOpen: () => boolean;
   isCaretAtStart: () => boolean;
   compactContext: () => void;
@@ -442,6 +450,8 @@ export interface ChatComposerProps {
   reportedModelSelection?: ModelSelection | null;
   activeProjectId: ProjectId | null;
   projectName?: string | undefined;
+  /** Null where this composer offers no voice mode: side chat panes and read-only threads. */
+  voiceMode: ComposerVoiceModeInput | null;
 
   compactThreadUnavailable: boolean;
   compactDisabled: boolean;
@@ -2062,6 +2072,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     modelPickerOpen: isComposerModelPickerOpen,
     ...(backgroundThread ? { targetRef: composerFormRef } : {}),
   });
+  const voiceMode = useComposerVoiceMode({
+    environmentId,
+    projectId: activeProjectId,
+    threadId: activeThreadId,
+    composer: props.voiceMode,
+  });
+  const toggleVoiceModeStable = useStableCallback(voiceMode.toggle);
+  const voiceModeShortcutLabel = shortcutLabelForCommand(keybindings, "composer.voiceMode", {
+    context: { terminalFocus: false, terminalOpen },
+  });
 
   const resolveActiveComposerTrigger = (): {
     snapshot: { value: string; cursor: number; expandedCursor: number };
@@ -2837,6 +2857,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     ? bannerItems.filter(
         (item) =>
           item.id === HELD_COMPOSER_SEND_BANNER_ID ||
+          // A pending approval is exactly when the voice agent says "approve in the app".
+          item.id === VOICE_MODE_BANNER_ID ||
           (item.group === "environment" &&
             (item.variant === "error" || item.variant === "warning")),
       )
@@ -3404,6 +3426,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           openModelPickerStable();
         }
       },
+      toggleVoiceMode: toggleVoiceModeStable,
       openControl: (command) => {
         if (composerBlurFrameRef.current !== null) {
           window.cancelAnimationFrame(composerBlurFrameRef.current);
@@ -3594,6 +3617,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       selectedProvider,
       selectedProviderModels,
       compactThreadContextStable,
+      toggleVoiceModeStable,
     ],
   );
 
@@ -3657,6 +3681,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         ) {
           event.preventDefault();
           cancelHeldSend();
+        } else if (
+          event.key === "Escape" &&
+          voiceMode.activity === "connecting" &&
+          !event.defaultPrevented &&
+          !event.nativeEvent.isComposing
+        ) {
+          event.preventDefault();
+          voiceAgentSession.end();
         }
       }}
       onFocusCapture={(event) => {
@@ -4163,6 +4195,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                         />
                       </>
                     ) : null}
+                    {voiceMode.entry.kind === "hidden" ||
+                    speechInput.state.phase !== "idle" ? null : (
+                      <ComposerVoiceModeButton
+                        entry={voiceMode.entry}
+                        connecting={voiceMode.activity === "connecting"}
+                        shortcutLabel={voiceModeShortcutLabel}
+                        onToggle={voiceMode.toggle}
+                      />
+                    )}
+                    {voiceMode.consent ? <VoiceModeConsentDialog {...voiceMode.consent} /> : null}
                     <VoiceInputSetup
                       environmentId={speechInput.transcriptionEnvironmentId}
                       open={speechInput.setup.open}

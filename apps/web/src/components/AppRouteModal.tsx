@@ -16,6 +16,7 @@ import { useNativeTitlebarHeight } from "../lib/windowControlsOverlay";
 import { requestWorkspaceFocus } from "../lib/workspaceFocus";
 import { useCloseAppModal } from "./sidebar/mainAppLocation";
 import { GlobalVoiceInputIndicator } from "./chat/GlobalVoiceInputIndicator";
+import { GlobalVoiceModeIndicator } from "./chat/GlobalVoiceModeIndicator";
 import { Button } from "./ui/button";
 import { DialogBackdrop } from "./ui/dialog";
 import { SharedTooltipTrigger } from "./ui/shared-tooltip";
@@ -145,6 +146,8 @@ export function AppRouteModal({
             />
             {children}
             <GlobalVoiceInputIndicator />
+            {/* These pages cover the thread, so the session is always elsewhere here. */}
+            <GlobalVoiceModeIndicator shownTarget={null} />
           </DialogPrimitive.Popup>
         </DialogPrimitive.Viewport>
       </DialogPrimitive.Portal>

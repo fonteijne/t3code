@@ -47,7 +47,7 @@ interface CachedModels {
 }
 
 /** The generator's name for messages: its label, else the host it reaches. */
-const generatorLabel = (config: TextGeneratorConfig) => {
+export const generatorLabel = (config: TextGeneratorConfig) => {
   if (config.label) return config.label;
   try {
     return new URL(config.baseUrl).host;

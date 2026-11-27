@@ -120,6 +120,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("ServerEnvironmen
           projectWorktreeCleanup: true,
           worktreesDirectory: true,
           threadAutoSettlementScope: true,
+          // Advertised with the `/ws/voice-agent` route, which server.ts mounts unconditionally.
+          voiceMode: true,
         });
       }
     }),

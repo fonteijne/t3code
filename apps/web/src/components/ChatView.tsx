@@ -64,6 +64,8 @@ import type { UsageLimitSourceSnapshots } from "@t3tools/contracts";
 import { feedbackBannerItem } from "./chat/ComposerFeedback";
 import { freshSessionBannerItem } from "./chat/ComposerFreshSession";
 import { heldComposerSendBannerItem } from "./chat/ComposerHeldSendBanner";
+import { useVoiceModePresentation, voiceModeBannerItem } from "./chat/VoiceModeBanner";
+import type { ComposerVoiceModeInput } from "../speech/voiceMode.logic";
 import { armFreshSession, disarmFreshSession, useFreshSessionArmed } from "./chat/freshSessionArms";
 import { cancelHeldComposerSend, useComposerSendHeld } from "./chat/preparingComposerImages";
 import { useUsageLimitsPanel } from "./chat/useUsageLimitsPanel";
@@ -2418,6 +2420,15 @@ export default function ChatView(props: ChatViewProps) {
       ? (draftThread?.worktreeRepositories ?? rememberedWorktreeRepositories)
       : undefined,
   }).strategyRepositories;
+  // Side chat panes, side chats and subagent threads have no voice mode entry point.
+  const voiceModeComposerInput: ComposerVoiceModeInput | null =
+    embedded || activeProject === null || sideThreadKind !== null
+      ? null
+      : isServerThread
+        ? "thread"
+        : isLocalDraftThread
+          ? "draft"
+          : null;
   const localCheckoutBranchMismatch = isServerThread
     ? resolveLocalCheckoutBranchMismatch({
         effectiveEnvMode: envMode,
@@ -2777,7 +2788,28 @@ export default function ChatView(props: ChatViewProps) {
       : null,
     messages,
   );
+  const voiceModePresentation = useVoiceModePresentation(
+    embedded || sideThreadKind !== null ? null : routeThreadRef,
+  );
+  const startVoiceModeAgainStable = useStableCallback(
+    () => void composerRef.current?.toggleVoiceMode(),
+  );
   const composerBannerItems = (() => {
+    // First, so the card is the top of the stack and notices that need an answer stay next to
+    // the composer.
+    const voiceModeItems =
+      voiceModePresentation === "hidden"
+        ? []
+        : [
+            voiceModeBannerItem(
+              {
+                presentation: voiceModePresentation,
+                environmentId,
+                onStartAgain: startVoiceModeAgainStable,
+              },
+              messages,
+            ),
+          ];
     const fallbackSelection = draftFallback?.selection;
     const defaultSelection =
       draftDefaultModelSelection ??
@@ -2848,6 +2880,7 @@ export default function ChatView(props: ChatViewProps) {
       : [];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
       return [
+        ...voiceModeItems,
         ...feedbackBannerItems,
         ...fallbackItems,
         ...limitRecoveryItems,
@@ -2860,6 +2893,7 @@ export default function ChatView(props: ChatViewProps) {
       ];
     }
     return [
+      ...voiceModeItems,
       ...feedbackBannerItems,
       ...fallbackItems,
       ...limitRecoveryItems,
@@ -3954,6 +3988,7 @@ export default function ChatView(props: ChatViewProps) {
                                 activeThreadModelSelection={activeThread?.modelSelection}
                                 activeProjectId={activeProject?.id ?? null}
                                 projectName={activeProject?.title}
+                                voiceMode={voiceModeComposerInput}
                                 compactThreadUnavailable={compactThreadUnavailable}
                                 compactDisabled={compactDisabled}
                                 resolvedTheme={resolvedTheme}

@@ -158,6 +158,9 @@ import * as VcsProjectConfig from "./vcs/VcsProjectConfig.ts";
 import * as VcsProcess from "./vcs/VcsProcess.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
+import * as RealtimeUpstream from "./voiceAgent/RealtimeUpstream.ts";
+import * as VoiceAgentSessions from "./voiceAgent/VoiceAgentSessions.ts";
+import * as VoiceAgentThreads from "./voiceAgent/VoiceAgentThreads.ts";
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
 import * as ReviewService from "./review/ReviewService.ts";
@@ -927,6 +930,7 @@ const layerMakeRoutes = Layer.mergeAll(
     ServerHttp.layerStaticAndDevRoute,
     Ws.layer,
     speechStreamRouteLayer,
+    VoiceAgentSessions.routeLayer,
   ),
   McpHttpServer.layer.pipe(
     Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
@@ -970,6 +974,12 @@ const layerMakeRoutes = Layer.mergeAll(
     ),
   ),
   Layer.provide(CloudSpeech.layer.pipe(Layer.provide(SecretResolver.layer))),
+  Layer.provide(
+    VoiceAgentSessions.layer.pipe(
+      Layer.provide(Layer.mergeAll(VoiceAgentThreads.layer, RealtimeUpstream.layer)),
+      Layer.provide(SecretResolver.layer),
+    ),
+  ),
   Layer.provide(layerServerSettings),
   Layer.provide(PreviewAutomationBroker.layer),
   Layer.provide(ServerSelfUpdate.layer.pipe(Layer.provide(layerDesktopAppUpdate))),

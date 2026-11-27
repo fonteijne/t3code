@@ -221,6 +221,11 @@ type VoiceInputSession = {
 let activeSession: VoiceInputSession | null = null;
 let activeTranscriptionOperation: Promise<unknown> | null = null;
 
+const microphoneListeners = new Set<() => void>();
+const notifyMicrophone = () => {
+  for (const listener of microphoneListeners) listener();
+};
+
 function acquireSession(): VoiceInputSession | null {
   if (activeSession) return null;
   let release!: () => void;
@@ -229,6 +234,7 @@ function acquireSession(): VoiceInputSession | null {
   });
   const token = { abandoned: false, released, release };
   activeSession = token;
+  notifyMicrophone();
   return token;
 }
 
@@ -236,7 +242,28 @@ function releaseSession(token: VoiceInputSession | null): void {
   if (token && activeSession === token) {
     activeSession = null;
     token.release();
+    notifyMicrophone();
   }
+}
+
+/** The app's one microphone, shared by dictation and voice mode. */
+export type VoiceMicrophoneLease = VoiceInputSession;
+
+/** Takes the microphone, waiting out a holder that is already letting go. Null while it is held. */
+export async function acquireVoiceMicrophone(): Promise<VoiceMicrophoneLease | null> {
+  for (let previous = activeSession; previous?.abandoned; previous = activeSession)
+    await previous.released;
+  return acquireSession();
+}
+
+export const releaseVoiceMicrophone = releaseSession;
+
+/** Whether dictation or voice mode holds the microphone. */
+export const voiceMicrophoneHeld = (): boolean => activeSession !== null;
+
+export function subscribeVoiceMicrophone(listener: () => void): () => void {
+  microphoneListeners.add(listener);
+  return () => microphoneListeners.delete(listener);
 }
 
 async function runTranscriptionOperation<T>(operation: () => Promise<T>): Promise<T> {
@@ -800,4 +827,5 @@ export class VoiceInputController {
 export function resetVoiceInputGlobalsForTests(): void {
   activeSession = null;
   activeTranscriptionOperation = null;
+  notifyMicrophone();
 }

@@ -13,7 +13,7 @@ import { SharedTooltipTrigger } from "../ui/shared-tooltip";
 
 type DownloadProgress = { downloaded: number; total: number } | null;
 
-const keepFocus = (event: PointerEvent) => event.preventDefault();
+export const keepFocus = (event: PointerEvent) => event.preventDefault();
 
 /** One short status line per phase; also mirrored into the preview annotation editor. */
 export function resolveSpeechPresentation(
@@ -97,7 +97,7 @@ function RecordingStatus(props: {
   );
 }
 
-function ShortcutTooltip(props: {
+export function ShortcutTooltip(props: {
   label: string;
   shortcut?: string | null | undefined;
   children: ReactElement;

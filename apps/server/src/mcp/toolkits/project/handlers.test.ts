@@ -63,6 +63,8 @@ const clientLaunchHarness = (input: {
   readonly launched: Array<ThreadLaunch.ThreadLaunchInput>;
   readonly workspaceRoot?: string;
   readonly checkWorktreeBase?: ThreadLaunch.ThreadLaunchService["Service"]["checkWorktreeBase"];
+  /** Where the project starts a thread when nobody chose. Default: the project folder. */
+  readonly defaultWorkspaceStrategy?: ThreadLaunch.ThreadLaunchService["Service"]["defaultWorkspaceStrategy"];
   readonly hostedAppUrl?: string;
   /** The orchestrator refuses the new thread's mode, as under a managed ceiling. */
   readonly refusedByCeiling?: true;
@@ -137,6 +139,8 @@ const clientLaunchHarness = (input: {
     }),
     Layer.mock(ThreadLaunch.ThreadLaunchService)({
       checkWorktreeBase: input.checkWorktreeBase ?? (() => Effect.void),
+      defaultWorkspaceStrategy:
+        input.defaultWorkspaceStrategy ?? (() => Effect.succeed({ type: "root" as const })),
       launch: (launch) => {
         input.launched.push(launch);
         if (input.refusedByCeiling) {
@@ -917,30 +921,23 @@ it.effect("a worktree launch that omits startFromOrigin follows the new-worktree
   }),
 );
 
-it.effect("a launch that omits its workspace follows the new-threads-in-a-worktree default", () =>
+it.effect("a launch that omits its workspace starts where the project's default puts it", () =>
   Effect.gen(function* () {
-    const fileSystem = yield* FileSystem.FileSystem;
-    for (const source of ["setting", "t3.json"] as const) {
-      const repo = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-launch-env-mode-" });
+    const worktree = { type: "worktree" as const, baseRef: "main", startFromOrigin: true };
+    for (const [defaultStrategy, expected] of [
+      [Effect.succeed(worktree), [worktree, { type: "root" }]],
+      [Effect.succeed({ type: "root" as const }), [{ type: "root" }, { type: "root" }]],
+      [
+        Effect.fail(new ThreadLaunch.ThreadLaunchBranchUnreadableError({ workspaceRoot: "/repo" })),
+        "refused",
+      ],
+    ] as const) {
       const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
       const { projectId, dependencies } = clientLaunchHarness({
         runtimeModeCeiling: "auto",
         launched,
-        workspaceRoot: repo,
-        ...(source === "setting" ? { defaultThreadEnvMode: "worktree" as const } : {}),
+        defaultWorkspaceStrategy: () => defaultStrategy,
       });
-      const git = yield* GitVcsDriver.GitVcsDriver.pipe(Effect.provide(dependencies));
-      for (const args of [
-        ["init", "-b", "main"],
-        ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init"],
-      ]) {
-        yield* git.execute({ operation: "test.setupRepo", cwd: repo, args });
-      }
-      if (source === "t3.json")
-        yield* fileSystem.writeFileString(
-          `${repo}/t3.json`,
-          JSON.stringify({ defaultThreadEnvMode: "worktree" }),
-        );
       const toolkit = yield* ProjectToolkit.pipe(
         Effect.provide(
           McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
@@ -948,86 +945,30 @@ it.effect("a launch that omits its workspace follows the new-threads-in-a-worktr
           ),
         ),
       );
-      for (const workspaceStrategy of [undefined, { type: "root" as const }]) {
-        yield* toolkit
+      const launch = (workspaceStrategy?: { readonly type: "root" }) =>
+        toolkit
           .handle("t3_thread_launch", {
             title: "Fix",
             projectId,
             ...(workspaceStrategy === undefined ? {} : { workspaceStrategy }),
           })
           .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
-      }
-
-      expect(
-        launched.map((launch) => launch.workspaceStrategy.type),
-        source,
-      ).toEqual(["worktree", "root"]);
-    }
-  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-);
-
-it.effect("a defaulted worktree launch stays shared only when Git says HEAD has no commit", () =>
-  Effect.gen(function* () {
-    const fileSystem = yield* FileSystem.FileSystem;
-    const commitArgs = ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty"];
-    for (const [checkout, expected] of [
-      ["not a repository", "root"],
-      ["no commit yet", "root"],
-      ["branch tip object missing", "worktree"],
-      ["git refuses the repository", "refused"],
-    ] as const) {
-      const repo = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-launch-head-" });
-      const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
-      const { projectId, dependencies } = clientLaunchHarness({
-        runtimeModeCeiling: "auto",
-        launched,
-        workspaceRoot: repo,
-        defaultThreadEnvMode: "worktree",
-      });
-      const git = yield* GitVcsDriver.GitVcsDriver.pipe(Effect.provide(dependencies));
-      if (checkout !== "not a repository")
-        yield* git.execute({
-          operation: "test.setupRepo",
-          cwd: repo,
-          args: ["init", "-b", "main"],
-        });
-      if (checkout === "branch tip object missing")
-        yield* fileSystem.writeFileString(`${repo}/.git/refs/heads/main`, `${"1".repeat(40)}\n`);
-      if (checkout === "git refuses the repository") {
-        yield* git.execute({
-          operation: "test.setupRepo",
-          cwd: repo,
-          args: [...commitArgs, "-m", "init"],
-        });
-        // Git quotes the broken file's path in its refusal; that path must not read as "not a repository".
-        yield* fileSystem.writeFileString(`${repo}/not a git repository`, "[core\n");
-        yield* fileSystem.writeFileString(
-          `${repo}/.git/config`,
-          `[include]\n\tpath = ${repo}/not a git repository\n`,
-        );
-      }
-      const toolkit = yield* ProjectToolkit.pipe(
-        Effect.provide(
-          McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
-            Layer.provide(dependencies),
-          ),
-        ),
-      );
-      const result = (yield* toolkit
-        .handle("t3_thread_launch", { title: "Fix", projectId })
-        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies))).at(-1)?.result;
+      const defaulted = (yield* launch()).at(-1)?.result;
+      // A caller that names the project folder gets it, whatever the default is.
+      yield* launch({ type: "root" });
 
       if (expected === "refused") {
-        expect(result, checkout).toMatchObject({ code: "orchestration_error" });
-        expect(launched, checkout).toHaveLength(0);
+        expect(defaulted).toMatchObject({
+          code: "orchestration_error",
+          message:
+            "Could not read the project's current branch for the new worktree. No thread was created. Retry, or pass workspaceStrategy.",
+        });
+        expect(launched.map((launch) => launch.workspaceStrategy)).toEqual([{ type: "root" }]);
       } else {
-        expect(
-          launched.map((launch) => launch.workspaceStrategy.type),
-          checkout,
-        ).toEqual([expected]);
+        expect(launched.map((launch) => launch.workspaceStrategy)).toEqual(expected);
       }
     }
-  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  }),
 );
 
 it.effect("a launch into a new worktree creates nothing when its branch collides", () =>
