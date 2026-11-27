@@ -10,6 +10,7 @@ import {
   DEFAULT_CLIENT_SETTINGS,
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
+  ProviderInstanceId,
   type EnvironmentSpeechModel,
   type ProjectId,
   type SpeechCustomWords,
@@ -24,8 +25,14 @@ import { VoiceInputSetup } from "../components/chat/VoiceInputSetup";
 import type { createBrowserVoiceInputPlatform } from "./browserVoiceInput";
 import { useEnvironmentSpeechInput } from "./useEnvironmentSpeechInput";
 import {
+  useVoiceAgentAvailability,
+  voiceAgentSession,
+  type VoiceAgentAvailability,
+} from "./voiceAgentSession";
+import {
   chooseAudioDestination,
   chooseTranscriptCleanup,
+  chooseVoiceAgentDestination,
   bindAudioGrant,
   pendingCloudAudioChoice,
 } from "./voiceConsent";
@@ -33,6 +40,7 @@ import { writeBrowserClientSettings } from "../clientPersistenceStorage";
 
 const mocks = vi.hoisted(() => ({
   voice: undefined as unknown as ReturnType<typeof useEnvironmentSpeechInput>,
+  voiceMode: undefined as unknown as VoiceAgentAvailability,
   settings: {} as Record<string, unknown>,
   connected: new Set<string>(),
   voiceCapable: new Set<string>(),
@@ -79,10 +87,11 @@ vi.mock("../state/session", () => ({
     }
     return Option.some(prepared);
   },
+  readPreparedConnection: (environmentId: string) =>
+    mocks.connected.has(environmentId) ? { environmentId, label: environmentId } : null,
 }));
-vi.mock("../state/environments", () => ({
-  usePrimaryEnvironmentId: () => mocks.primaryEnvironmentId,
-  useEnvironment: (environmentId: string | null) =>
+vi.mock("../state/environments", () => {
+  const environment = (environmentId: string | null) =>
     environmentId && mocks.connected.has(environmentId)
       ? {
           environmentId,
@@ -91,12 +100,23 @@ vi.mock("../state/environments", () => ({
               capabilities: {
                 voiceTranscription: mocks.voiceCapable.has(environmentId),
                 cloudVoiceTranscription: mocks.cloudVoiceCapable.has(environmentId),
+                voiceMode: true,
               },
+            },
+            settings: {
+              ...DEFAULT_SERVER_SETTINGS,
+              voiceModeEnabled: true,
+              textGenerators: { [VOICE_MODE.endpointId]: VOICE_MODE.endpoint },
             },
           },
         }
-      : null,
-}));
+      : null;
+  return {
+    usePrimaryEnvironmentId: () => mocks.primaryEnvironmentId,
+    useEnvironment: environment,
+    readEnvironment: environment,
+  };
+});
 vi.mock("../hooks/useSettings", () => ({
   updateClientSettings: vi.fn(),
   getClientSettings: () => ({ ...DEFAULT_CLIENT_SETTINGS, ...mocks.settings }),
@@ -176,6 +196,11 @@ vi.mock("@t3tools/client-runtime/voice-input", async (importOriginal) => ({
       return { text: `Cleaned ${transcript}` };
     }),
 }));
+// AppRouteModal mounts it, and its thread lookup reaches ../state/server, which needs the real
+// ../state/session. Voice mode has its own tests.
+vi.mock("../components/chat/GlobalVoiceModeIndicator", () => ({
+  GlobalVoiceModeIndicator: () => null,
+}));
 vi.mock("./appleSpeech", () => ({
   useAppleSpeechLocales: () => (mocks.appleSpeech ? ["en-US"] : []),
 }));
@@ -225,6 +250,16 @@ function mockPlatform(
 }
 
 const THREAD_ENV = "thread-env";
+const VOICE_MODE = {
+  endpointId: ProviderInstanceId.make("gateway"),
+  endpoint: {
+    kind: "openaiCompatible",
+    baseUrl: "https://gateway.example.test/v1",
+    apiKey: "",
+    enabled: true,
+    voiceModel: "realtime-voice",
+  },
+} as const;
 
 function setup(options: { readonly destination?: string | null } = {}) {
   mocks.settings = {};
@@ -473,6 +508,73 @@ it.each([
   await vi.waitFor(() => expect(mocks.storedDraft).toBe("Earlier text dictated"));
   expect(mocks.transcribeCalls).toEqual([onDevice ? "apple-speech" : "env-a"]);
   expect(mocks.committed).not.toHaveBeenCalled();
+});
+
+function VoiceModeProbe() {
+  const availability = useVoiceAgentAvailability(
+    THREAD_ENV as EnvironmentId,
+    "project-a" as ProjectId,
+  );
+  useLayoutEffect(() => {
+    mocks.voiceMode = availability;
+  });
+  return null;
+}
+
+it("gives the one microphone to dictation or to voice mode, whichever took it first", async () => {
+  setup({ destination: "env-a" });
+  const prompt = Promise.withResolvers<MediaStream>();
+  using _output = stubGlobal(
+    "AudioContext",
+    class {
+      audioWorklet = { addModule: async () => {} };
+      resume = async () => {};
+      close = async () => {};
+    },
+  );
+  using _microphone = vi
+    .spyOn(navigator.mediaDevices, "getUserMedia")
+    .mockReturnValue(prompt.promise);
+  using _voiceMode = {
+    [Symbol.dispose]: () => {
+      voiceAgentSession.end();
+      chooseVoiceAgentDestination(null);
+      prompt.resolve({ getTracks: () => [] } as unknown as MediaStream);
+    },
+  };
+  chooseVoiceAgentDestination({
+    environmentId: THREAD_ENV as EnvironmentId,
+    endpointId: VOICE_MODE.endpointId,
+    baseUrl: VOICE_MODE.endpoint.baseUrl,
+  });
+  await using _screen = await render(
+    <>
+      <Probe />
+      <VoiceModeProbe />
+    </>,
+  );
+  expect(mocks.voiceMode.status).toBe("ready");
+
+  await act(() => mocks.voice.start());
+  expect(mocks.voice.state.phase).toBe("recording");
+  expect(mocks.voiceMode.status).toBe("microphone-busy");
+  await act(() => mocks.voice.cancel());
+  expect(mocks.voiceMode.status).toBe("ready");
+
+  // Still at the permission prompt: the microphone is voice mode's from the starting gesture on.
+  await act(
+    () =>
+      void voiceAgentSession.start({
+        environmentId: THREAD_ENV as EnvironmentId,
+        projectId: "project-a" as ProjectId,
+        threadId: null,
+        draftThreadId: null,
+      }),
+  );
+  expect(mocks.voice.available).toBe(false);
+  expect(mocks.voiceMode.status).toBe("ready");
+  await act(() => voiceAgentSession.end());
+  expect(mocks.voice.available).toBe(true);
 });
 
 it("finishes an off-screen recording with the keyboard while Settings is open", async () => {

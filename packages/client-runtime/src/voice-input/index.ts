@@ -3,6 +3,8 @@ export {
   VOICE_RECORDING_LIMIT_SECONDS,
   MICROPHONE_PERMISSION_ERROR,
   voiceInputBlocksSubmission,
+  subscribeVoiceMicrophone,
+  voiceMicrophoneHeld,
   type VoiceDraftSnapshot,
   type VoiceInputControllerDependencies,
   type VoiceInputErrorCode,

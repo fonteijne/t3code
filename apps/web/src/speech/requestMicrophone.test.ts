@@ -81,3 +81,18 @@ it("keeps the system-default fallback across one Linux audio recovery", async ()
   ]);
   expect(restartAudioService).toHaveBeenCalledOnce();
 });
+
+it("keeps the audio processing constraints on the device request and on its fallback", async () => {
+  const stream = {} as MediaStream;
+  const getUserMedia = vi
+    .fn()
+    .mockRejectedValueOnce(new DOMException("Unsupported", "OverconstrainedError"))
+    .mockResolvedValueOnce(stream);
+  using _env = setup({ getUserMedia });
+  const processing = { echoCancellation: true, noiseSuppression: true, channelCount: 1 };
+  expect(await requestMicrophone("usb-mic", undefined, processing)).toBe(stream);
+  expect(getUserMedia.mock.calls).toEqual([
+    [{ audio: { ...processing, deviceId: { exact: "usb-mic" } } }],
+    [{ audio: { ...processing } }],
+  ]);
+});

@@ -13,20 +13,34 @@ const checkTextGeneratorConfig = vi.hoisted(() =>
   })),
 );
 
+const updateSettings = vi.hoisted(() => vi.fn());
+const SAVED_GENERATOR = {
+  kind: "openaiCompatible",
+  baseUrl: "http://localhost:1234/v1",
+  apiKey: "",
+  enabled: true,
+} as const;
+
 vi.mock("../../hooks/useSettings", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../hooks/useSettings")>()),
   useEnvironmentSettings: () => ({
     ...DEFAULT_SERVER_SETTINGS,
-    textGenerators: {
-      local: {
-        kind: "openaiCompatible",
-        baseUrl: "http://localhost:1234/v1",
-        apiKey: "",
-        enabled: true,
-      },
-    },
+    voiceModeEnabled: true,
+    textGenerators: { local: SAVED_GENERATOR },
   }),
-  useUpdateEnvironmentSettings: () => () => {},
+  useUpdateEnvironmentSettings: () => updateSettings,
+}));
+
+// The voice model field shows only on an environment that can run voice mode.
+vi.mock("../../state/environments", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../state/environments")>()),
+  useEnvironment: () => ({
+    serverConfig: { environment: { capabilities: { voiceMode: true } } },
+  }),
+}));
+vi.mock("../../state/session", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../state/session")>()),
+  useEnvironmentScope: () => true,
 }));
 
 vi.mock("../../textGenerators", async (importOriginal) => ({
@@ -106,4 +120,26 @@ it("submits step 1 of the text generator wizard on Enter when Connect is enabled
   await expect
     .element(page.getByText(/localhost:11434 is connected and lists 1 model\./))
     .toBeVisible();
+});
+
+it("saves a typed voice model that the endpoint does not list, with the rest of the entry", async () => {
+  updateSettings.mockClear();
+  await using _screen = await render(
+    <TextGeneratorsSettings
+      environmentId={EnvironmentId.make("local")}
+      environmentLabel="This device"
+      providers={[]}
+      readOnly={false}
+    />,
+  );
+  await userEvent.click(page.getByRole("button", { name: "More actions for localhost:1234" }));
+  await userEvent.click(page.getByRole("menuitem", { name: "Edit" }));
+  await userEvent.click(page.getByRole("button", { name: "Save and continue" }));
+
+  await userEvent.type(page.getByRole("combobox", { name: "Voice model" }), "typed-name{Enter}");
+
+  // The whole entry goes back: its redacted key marker keeps the saved key.
+  expect(updateSettings).toHaveBeenLastCalledWith({
+    textGenerators: { local: { ...SAVED_GENERATOR, voiceModel: "typed-name" } },
+  });
 });

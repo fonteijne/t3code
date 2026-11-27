@@ -1,6 +1,22 @@
 import { expect, it, vi } from "vite-plus/test";
 
-it("meters microphone-only capture like transcription without emitting PCM", async () => {
+class Worklet {
+  readonly port = {
+    onmessage: null as ((event: { data: string }) => void) | null,
+    postMessage: vi.fn<(data: unknown) => void>(),
+  };
+  process(_inputs: Float32Array[][]): boolean {
+    return true;
+  }
+}
+type Processor = new (options?: {
+  processorOptions: {
+    meterOnly?: boolean;
+    pcm16?: { sampleRate: number; frameSamples: number };
+  };
+}) => Worklet;
+
+async function loadWorklet() {
   using globals = new DisposableStack();
   const setGlobal = (name: string, value: unknown) => {
     const original = Object.getOwnPropertyDescriptor(globalThis, name);
@@ -10,22 +26,22 @@ it("meters microphone-only capture like transcription without emitting PCM", asy
     });
     Object.defineProperty(globalThis, name, { value, configurable: true, writable: true });
   };
-  class Worklet {
-    readonly port = {
-      onmessage: null as ((event: { data: string }) => void) | null,
-      postMessage: vi.fn<(data: unknown) => void>(),
-    };
-    process(_inputs: Float32Array[][]): boolean {
-      return true;
-    }
-  }
-  let Processor!: new (options?: { processorOptions: { meterOnly: boolean } }) => Worklet;
+  let Processor!: Processor;
   setGlobal("sampleRate", 48_000);
   setGlobal("AudioWorkletProcessor", Worklet);
-  setGlobal("registerProcessor", (_name: string, processor: typeof Processor) => {
+  setGlobal("registerProcessor", (_name: string, processor: Processor) => {
     Processor = processor;
   });
+  // The module registers its processor when it is evaluated, so each test evaluates it afresh.
+  vi.resetModules();
   await import("./pcmWorklet");
+  const restore = globals.move();
+  return { Processor, [Symbol.dispose]: () => restore.dispose() };
+}
+
+it("meters microphone-only capture like transcription without emitting PCM", async () => {
+  using worklet = await loadWorklet();
+  const { Processor } = worklet;
   const transcription = new Processor();
   const microphone = new Processor({ processorOptions: { meterOnly: true } });
   transcription.port.onmessage?.({ data: "start" });
@@ -61,4 +77,23 @@ it("meters microphone-only capture like transcription without emitting PCM", asy
   );
   microphone.port.onmessage?.({ data: "stop" });
   expect(microphone.port.postMessage).toHaveBeenLastCalledWith("stopped");
+});
+
+it("emits 16-bit frames at the requested rate with no duration limit for voice mode", async () => {
+  using worklet = await loadWorklet();
+  const voice = new worklet.Processor({
+    processorOptions: { pcm16: { sampleRate: 24_000, frameSamples: 960 } },
+  });
+  voice.port.onmessage?.({ data: "start" });
+  const second = new Float32Array(48_000).fill(1);
+  // Five minutes is where dictation stops: 4 800 000 samples of output.
+  for (let seconds = 0; seconds < 301; seconds++) voice.process([[second]]);
+
+  const posted = voice.port.postMessage.mock.calls.map(([data]) => data);
+  const frames = posted.filter((data) => data instanceof Int16Array);
+  expect(posted).not.toContain("limit");
+  expect(posted.some((data) => data instanceof Float32Array)).toBe(false);
+  expect(frames).toHaveLength((301 * 24_000) / 960);
+  expect(frames.every((frame) => frame.length === 960)).toBe(true);
+  expect(Array.from(new Set(frames.at(-1)))).toEqual([32_767]);
 });

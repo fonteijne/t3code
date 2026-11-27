@@ -1,4 +1,8 @@
-import { VoiceTranscriptionDestination } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProviderInstanceId,
+  VoiceTranscriptionDestination,
+} from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { useSyncExternalStore } from "react";
 import { randomUUID } from "../lib/utils";
@@ -10,9 +14,10 @@ import {
   writeLocalStorageValue,
 } from "../hooks/useLocalStorage";
 
-// Separate keys: a stale window saving ordinary preferences must not restore either grant.
+// Separate keys: a stale window saving ordinary preferences must not restore any grant.
 const AUDIO_KEY = "t3code:voice-audio-grant:v1";
 const CLEANUP_KEY = "t3code:voice-cleanup-grant:v1";
+const VOICE_AGENT_KEY = "t3code:voice-agent-grant:v1";
 // "device" is Apple Speech in the macOS desktop app. Audio stays on this device, so it stays out of the shared contract.
 const AudioDestination = Schema.Union([
   VoiceTranscriptionDestination,
@@ -124,4 +129,57 @@ export function readCleanupGrant() {
 }
 export function chooseTranscriptCleanup(enabled: boolean) {
   writeLocalStorageValue(CLEANUP_KEY, enabled ? randomUUID() : null, null, CleanupGrant);
+}
+
+/** Where voice mode sends microphone audio: an endpoint, at an address, through an environment. */
+const VoiceAgentDestination = Schema.Struct({
+  environmentId: EnvironmentId,
+  endpointId: ProviderInstanceId,
+  /** The endpoint's address when consent was given. Editing it asks again. */
+  baseUrl: Schema.String,
+});
+export type VoiceAgentDestination = typeof VoiceAgentDestination.Type;
+
+const VoiceAgentGrant = Schema.NullOr(
+  Schema.Struct({ id: Schema.String, destination: VoiceAgentDestination }),
+);
+const sameVoiceAgentDestination = Schema.toEquivalence(VoiceAgentDestination);
+const decodeVoiceAgentGrant = Schema.decodeSync(Schema.fromJsonString(VoiceAgentGrant));
+
+export function useVoiceAgentGrant() {
+  return useLocalStorage(VOICE_AGENT_KEY, null, VoiceAgentGrant)[0];
+}
+
+/** Null revokes. A destination replaces the previous one: one endpoint is allowed at a time. */
+export function chooseVoiceAgentDestination(destination: VoiceAgentDestination | null) {
+  writeLocalStorageValue(
+    VOICE_AGENT_KEY,
+    destination ? { id: randomUUID(), destination } : null,
+    null,
+    VoiceAgentGrant,
+  );
+}
+
+export function voiceAgentGrantCovers(
+  grant: typeof VoiceAgentGrant.Type,
+  destination: VoiceAgentDestination,
+): boolean {
+  return grant !== null && sameVoiceAgentDestination(grant.destination, destination);
+}
+
+// Binds a session to one act of consent: revoking, or allowing again, ends it.
+export function bindVoiceAgentGrant(destination: VoiceAgentDestination): () => boolean {
+  try {
+    const raw = window.localStorage.getItem(VOICE_AGENT_KEY);
+    if (!raw || !voiceAgentGrantCovers(decodeVoiceAgentGrant(raw), destination)) return () => false;
+    return () => {
+      try {
+        return window.localStorage.getItem(VOICE_AGENT_KEY) === raw;
+      } catch {
+        return false;
+      }
+    };
+  } catch {
+    return () => false;
+  }
 }

@@ -3824,6 +3824,14 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       expect(commitInstructions[0]).toContain("Local AGENTS.md:\nUse imperative subjects.");
       expect(commitInstructions[0]).not.toContain("Local CLAUDE.md:");
       expect(commitInstructions[1]).toContain("Local CLAUDE.md:\nMention the Claude provider.");
+
+      // A file over the default cap is skipped, unless the caller asks for a larger one.
+      const long = `${"Keep commits small. ".repeat(1_500)}\n`;
+      NodeFS.writeFileSync(NodePath.join(repoDir, "AGENTS.md"), long);
+      expect(yield* manager.readRepositoryInstructions(repoDir, "AGENTS.md")).toBe("");
+      expect(yield* manager.readRepositoryInstructions(repoDir, "AGENTS.md", 200_000)).toBe(
+        long.trim(),
+      );
     }),
   );
 

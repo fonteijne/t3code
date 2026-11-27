@@ -1,4 +1,7 @@
+import { voiceAgentIsActive } from "@t3tools/client-runtime/voice-agent";
+
 import type { ComposerHandleRef } from "../../composerHandleContext";
+import { voiceAgentSession } from "../../speech/voiceAgentSession";
 import type { BranchToolbarHandle } from "../BranchToolbar";
 import type { ChatComposerHandle } from "./ChatComposer";
 import type { ChatShortcutCommands } from "./useChatShortcuts";
@@ -33,6 +36,16 @@ export function composerShortcutCommands(
     },
     "composer.previousWorktree": ({ event }) => {
       if (!event.repeat) branchToolbarRef.current?.usePreviousWorktree();
+    },
+    "composer.voiceMode": ({ event }) => {
+      if (event.repeat) return undefined;
+      // Ending needs no composer: the session's thread may be shown in a view that has none.
+      if (voiceAgentIsActive(voiceAgentSession.getSnapshot().state)) {
+        voiceAgentSession.end();
+        return true;
+      }
+      // False where there is nothing to start, so the chord reaches the page or the browser.
+      return composerRef.current?.toggleVoiceMode() ?? false;
     },
   } satisfies ChatShortcutCommands;
 }

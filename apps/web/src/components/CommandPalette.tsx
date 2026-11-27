@@ -63,6 +63,7 @@ import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { useLocation, useNavigate } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
+  AudioLinesIcon,
   BugIcon,
   ChartNoAxesColumnIcon,
   CheckIcon,
@@ -287,6 +288,12 @@ import { Button } from "./ui/button";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { suggestAppAccessForRemote } from "./sourceControlAppAccessToast";
 import { ComposerHandleContext, useComposerHandleContext } from "../composerHandleContext";
+import {
+  useVoiceAgentActive,
+  useVoiceAgentAvailability,
+  voiceAgentSession,
+} from "../speech/voiceAgentSession";
+import { threadTakesVoiceMode } from "../speech/voiceMode.logic";
 import type { ChatComposerHandle } from "./chat/ChatComposer";
 import {
   isPickableProjectMember,
@@ -516,6 +523,20 @@ function OpenCommandPaletteDialog(props: {
   const { activeDraftThread, activeThread, defaultProjectRef, handleNewThread } =
     useHandleNewThread();
   const paletteRouteTarget = useThreadRouteTarget();
+  const composerHandleRef = useComposerHandleContext();
+  // Through the composer's handle, synchronously: a start must stay inside the selecting gesture.
+  const toggleVoiceModeStable = useStableCallback(async () => {
+    composerHandleRef?.current?.toggleVoiceMode();
+  });
+  const voiceModeRef = activeThread ?? activeDraftThread;
+  const voiceModeActive = useVoiceAgentActive();
+  // Hidden without a thread or draft on the route, and on side chats and subagent threads.
+  const voiceModeAvailability = useVoiceAgentAvailability(
+    paletteRouteTarget === null || !threadTakesVoiceMode(activeThread)
+      ? null
+      : (voiceModeRef?.environmentId ?? null),
+    voiceModeRef?.projectId ?? null,
+  );
   const projects = useProjects();
   const referenceThreadRef =
     pathname === "/pull-requests"
@@ -1453,6 +1474,31 @@ function OpenCommandPaletteDialog(props: {
       run: async () => {
         openThreadFind(activeThreadKey);
       },
+    });
+  }
+
+  if (voiceModeActive) {
+    // Needs no composer, so it is offered on every route, Settings included.
+    actionItems.push({
+      kind: "action",
+      value: "action:end-voice-mode",
+      searchTerms: ["voice", "talk", "speak", "microphone", "stop", "hang up"],
+      title: gt("End voice mode"),
+      icon: <AudioLinesIcon className={ITEM_ICON_CLASS} />,
+      shortcutCommand: "composer.voiceMode",
+      run: async () => {
+        voiceAgentSession.end();
+      },
+    });
+  } else if (voiceModeAvailability.status !== "hidden") {
+    actionItems.push({
+      kind: "action",
+      value: "action:start-voice-mode",
+      searchTerms: ["voice", "talk", "speak", "microphone", "realtime", "conversation"],
+      title: gt("Start voice mode"),
+      icon: <AudioLinesIcon className={ITEM_ICON_CLASS} />,
+      shortcutCommand: "composer.voiceMode",
+      run: toggleVoiceModeStable,
     });
   }
 

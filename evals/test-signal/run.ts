@@ -8,10 +8,10 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
 import * as Effect from "effect/Effect";
-import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
-import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
+import { FetchHttpClient } from "effect/http";
 import { proxyConfig } from "../shared/proxy.ts";
+import { postResponses } from "../shared/responses.ts";
 import { cases, type Case } from "./cases.ts";
 import { grade, testRange, type Comment } from "./grade.ts";
 
@@ -167,37 +167,10 @@ const system = (body: string) =>
     "</check_instructions>",
   ].join("\n");
 
-const decodeResponse = Schema.decodeUnknownSync(
-  Schema.fromJsonString(
-    Schema.Struct({
-      output: Schema.Array(Schema.Record(Schema.String, Schema.Unknown)),
-      usage: Schema.optional(Schema.Struct({ total_tokens: Schema.optional(Schema.Number) })),
-    }),
-  ),
-);
 const decodeArguments = Schema.decodeUnknownSync(
   Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
 );
 const encodeRow = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
-
-const post = Effect.fn("evaluateTestSignal.post")(function* (body: unknown) {
-  const client = (yield* HttpClient.HttpClient).pipe(
-    HttpClient.retryTransient({
-      retryOn: "errors-and-responses",
-      schedule: Schedule.exponential("2 seconds"),
-      times: 4,
-    }),
-  );
-  const response = yield* HttpClientRequest.post(`${proxy.url}/responses`).pipe(
-    HttpClientRequest.setHeaders(proxy.headers),
-    HttpClientRequest.bodyJson(body),
-    Effect.flatMap(client.execute),
-  );
-  const text = yield* response.text;
-  if (response.status !== 200)
-    return yield* Effect.die(new Error(`Model API ${response.status}: ${text}`));
-  return decodeResponse(text);
-});
 
 const runSample = Effect.fn("evaluateTestSignal.sample")(function* (entry: Case, model: string) {
   const { diff, files } = world(entry);
@@ -211,7 +184,7 @@ const runSample = Effect.fn("evaluateTestSignal.sample")(function* (entry: Case,
   let final = "";
   let tokens = 0;
   for (let step = 0; step < 16; step++) {
-    const response = yield* post({
+    const response = yield* postResponses(proxy, {
       model,
       instructions: system(instructions),
       input,

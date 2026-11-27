@@ -215,6 +215,12 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   voiceTranscription: Schema.optionalKey(Schema.Boolean),
   cloudVoiceTranscription: Schema.optionalKey(Schema.Boolean),
   /**
+   * Serves the voice mode media socket (`VOICE_AGENT_STREAM_PATH`) and reads `voiceModeEnabled`,
+   * `voiceAgentEndpoint` and a text generator's `voiceModel`. Older servers drop all three, so
+   * hide their controls and the entry points where absent.
+   */
+  voiceMode: Schema.optionalKey(Schema.Boolean),
+  /**
    * The server config's flags of the same names. A server that names them here lets a client
    * load the shell snapshot before the socket opens, and answers its `resumeFrom`.
    */

@@ -4,12 +4,10 @@ import {
   type ModelSelection,
   ThreadId,
   OrchestratorMcpFailure,
-  type OrchestrationV2ThreadLaunchWorkspaceStrategy,
   ProjectId,
   type TaskFolderError,
   type Project as ProjectRecord,
   type ServerProvider,
-  T3_PROJECT_FILE_NAME,
 } from "@t3tools/contracts";
 import * as Digest from "effect/crypto/Digest";
 import * as Effect from "effect/Effect";
@@ -32,12 +30,8 @@ import * as ServerSettings from "../../../serverSettings.ts";
 import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as DateTime from "effect/DateTime";
 import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
-import {
-  resolveProjectFileBackedSetting,
-  resolveProjectSettings,
-} from "@t3tools/shared/projectSettings";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { resolveProjectScripts } from "@t3tools/shared/projectScripts";
-import { parseT3ProjectFile } from "@t3tools/shared/t3ProjectFile";
 import {
   providerOptionDescriptors,
   refuseAgentModePick,
@@ -115,69 +109,6 @@ const projectWorktreePath = Effect.fn("mcp.assertProjectWorktree")(function* (
     message:
       "worktreePath must be one of the project's git worktrees. t3_worktree_list shows them.",
   });
-});
-
-/** The composer falls back to the project's t3.json when no setting picks the mode. */
-const projectFileThreadEnvMode = Effect.fn("mcp.projectFileThreadEnvMode")(function* (
-  workspaceRoot: string,
-) {
-  const fileSystem = yield* FileSystem.FileSystem;
-  const contents = yield* fileSystem
-    .readFileString(`${workspaceRoot}/${T3_PROJECT_FILE_NAME}`)
-    .pipe(Effect.orElseSucceed(() => null));
-  return resolveProjectFileBackedSetting(
-    "defaultThreadEnvMode",
-    null,
-    contents === null ? null : parseT3ProjectFile(contents),
-  ).value;
-});
-
-// Anchored to the fatal line: other diagnostics, such as a dubious-ownership refusal, quote the path.
-const NON_REPOSITORY_FATAL =
-  /^fatal: (?:not a git repository|gitfile does not point to a valid repository)/im;
-
-/** Branches from the checkout's current branch, as the composer does; a checkout with no commit or a detached HEAD stays shared. */
-const defaultWorktreeStrategy = Effect.fn("mcp.defaultWorktreeStrategy")(function* (
-  workspaceRoot: string,
-): Effect.fn.Return<
-  OrchestrationV2ThreadLaunchWorkspaceStrategy | undefined,
-  OrchestratorMcpFailure,
-  GitVcsDriver.GitVcsDriver
-> {
-  const git = yield* GitVcsDriver.GitVcsDriver;
-  const unreadable = new OrchestratorMcpFailure({
-    code: "orchestration_error",
-    message:
-      "Could not read the project's current branch for the new worktree. No thread was created. Retry, or pass workspaceStrategy.",
-  });
-  const commit = yield* git
-    .execute({
-      operation: "mcp.defaultWorktreeStrategy",
-      cwd: workspaceRoot,
-      // Not peeled: a branch whose tip object is missing still resolves, so only an unborn HEAD exits 1.
-      args: ["rev-parse", "--verify", "--quiet", "HEAD"],
-      allowNonZeroExit: true,
-      timeoutMs: 5_000,
-    })
-    .pipe(Effect.orElseSucceed(() => null));
-  // Only Git saying "no commit yet" (exit 1) or "not a repository" keeps the launch shared.
-  if (commit?.exitCode === 1 || (commit !== null && NON_REPOSITORY_FATAL.test(commit.stderr)))
-    return undefined;
-  if (commit?.exitCode !== 0) return yield* unreadable;
-  // symbolic-ref skips the index, so a held index lock cannot drop the launch into the shared checkout.
-  const head = yield* git
-    .execute({
-      operation: "mcp.defaultWorktreeStrategy",
-      cwd: workspaceRoot,
-      args: ["symbolic-ref", "--quiet", "--short", "HEAD"],
-      allowNonZeroExit: true,
-      timeoutMs: 5_000,
-    })
-    .pipe(Effect.orElseSucceed(() => null));
-  if (head?.exitCode === 1) return undefined;
-  const branch = head?.exitCode === 0 ? head.stdout.trim() : "";
-  if (branch.length === 0) return yield* unreadable;
-  return { type: "worktree" as const, baseRef: branch };
 });
 
 /** A fixed-length id, so a long key fits in the scratch folder name derived from it. */
@@ -393,15 +324,28 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
               );
         // An outside caller that names no workspace follows the new-threads-in-a-worktree
         // default, as the composer does.
-        const requestedStrategy =
+        const defaultStrategy =
           workspaceStrategy === undefined &&
           caller === undefined &&
           project !== undefined &&
-          projectSettings !== undefined &&
-          (projectSettings.defaultThreadEnvMode ??
-            (yield* projectFileThreadEnvMode(project.workspaceRoot))) === "worktree"
-            ? yield* defaultWorktreeStrategy(project.workspaceRoot)
-            : workspaceStrategy;
+          projectSettings !== undefined
+            ? yield* (yield* ThreadLaunch.ThreadLaunchService)
+                .defaultWorkspaceStrategy({
+                  workspaceRoot: project.workspaceRoot,
+                  settings: projectSettings,
+                })
+                .pipe(
+                  Effect.mapError(
+                    (error) =>
+                      new OrchestratorMcpFailure({
+                        code: "orchestration_error",
+                        message: `${error.message} No thread was created. Retry, or pass workspaceStrategy.`,
+                      }),
+                  ),
+                )
+            : undefined;
+        const requestedStrategy =
+          defaultStrategy?.type === "worktree" ? defaultStrategy : workspaceStrategy;
         // An omitted startFromOrigin follows the new-worktree setting, as the composer and
         // t3_worktree_handoff do. Otherwise a stale local branch silently becomes the base.
         const strategy =

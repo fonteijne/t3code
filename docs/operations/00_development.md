@@ -49,6 +49,10 @@ With `origin` on the mirror, use `src` instead of `gh`. PRs into `main` still me
 
 `vp run dev` registers `Replay (dev)` ([dev-replay-agent.ts](../../apps/server/scripts/dev-replay-agent.ts)), a local ACP agent that streams recorded transcripts without calling a paid model. Add scenarios under `SCENARIOS` pointing at a generic ACP fixture (`registry_transcript.ndjson`) or a file in `apps/server/scripts/dev-replay`.
 
+### Fake realtime endpoint
+
+Voice mode needs an OpenAI-Realtime-compatible endpoint. `node apps/server/scripts/fake-realtime-server.ts --port 8765` ([fake-realtime-server.ts](../../apps/server/scripts/fake-realtime-server.ts), also `vp run --filter t3 voice:fake-realtime`) serves one without a paid model: it answers speech with tones, passes a request to the thread's agent on the second of every three turns, and prints the events it receives. `POST /fake/next` with `{"tool":"<name>","arguments":{...}}` makes the next turn that tool call. Add the base URL it prints as a custom text generator with any key, pick the voice model it lists, and turn on **Settings → Labs → Voice mode**. It imitates no real endpoint's reactions, so passing against it proves nothing about a real gateway.
+
 ### Reusable dev credential
 
 Only use this on a hostname where you trust every service (browsers share cookies across ports on the same hostname). Generate one secret once and put it in the main checkout's gitignored `.env` (which `t3.json` links into worktrees):

@@ -990,6 +990,20 @@ describe("composer and pull request shortcuts", () => {
       }),
       "terminal.splitVertical",
     );
+    const voiceChord = event({ key: "v", ctrlKey: true, altKey: true });
+    assert.strictEqual(
+      resolveShortcutCommand(voiceChord, DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "Linux",
+        context: { terminalFocus: false },
+      }),
+      "composer.voiceMode",
+    );
+    assert.isNull(
+      resolveShortcutCommand(voiceChord, DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "Linux",
+        context: { terminalFocus: true },
+      }),
+    );
   });
   it("fills missing number shortcuts without replacing the saved URL binding", () => {
     const olderServerBindings = DEFAULT_RESOLVED_KEYBINDINGS.filter(

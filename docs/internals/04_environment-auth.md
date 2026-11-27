@@ -29,6 +29,19 @@ model.
   over authenticated HTTP so long-lived tokens never appear in socket URLs. DPoP RPC tickets stay
   proof-key bound at upgrade. A successful handshake grants no extra authority: every RPC declares
   and checks its required scope in [`RpcAuthorization.ts`](../../apps/server/src/auth/RpcAuthorization.ts).
+- **A media socket authorizes itself, and voice mode's ends with its session.** A socket upgraded
+  with a `media` ticket has no per-RPC check behind it, so its route checks the scope at upgrade.
+  Voice mode's `/ws/voice-agent` requires `orchestration:operate` and, like the device and preview
+  streams, races `SessionStore.awaitInvalidation`: it keeps sending thread commands and holds an
+  outbound connection for as long as the conversation lasts, so revoking the session must cut it
+  at once, not at the next connect. The server takes the endpoint, its address and its key from
+  saved settings when the session starts, which is why starting one needs no `providers:manage`
+  (as generating a thread title with the same text generator needs none). The client names the
+  endpoint and address its user consented to, and that can only make the server refuse: it never
+  connects to a value a client sent. The client's launch settings for new threads can only narrow
+  the session. A session's tools reach threads of that one project, never above the narrowest
+  runtime and interaction mode of the threads it has been bound to, rechecked at every dispatch,
+  and none of them answers a permission request.
 - **Secret references need `providers:manage`.** A request that names a secret for the server to
   read needs `providers:manage` on top of its method's scope, whether the reference is saved in
   settings or used once, as in a secret request answered with a reference. Typed values need only

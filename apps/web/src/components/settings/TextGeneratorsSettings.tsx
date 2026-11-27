@@ -60,6 +60,7 @@ import { Spinner } from "../ui/spinner";
 import { Switch } from "../ui/switch";
 import { WizardFooter, WizardHeader, WizardPanel, WizardPopup, WizardSteps } from "../ui/wizard";
 import { SecretSourceInput, useSecretSources } from "./SecretSourceInput";
+import { TextGeneratorVoiceModelField } from "./TextGeneratorVoiceModelField";
 import { useSearchableSetting } from "./settingsSearch";
 import { SETTINGS_PICKER_TRIGGER_CLASSNAME, SettingsRow, SettingsSection } from "./settingsLayout";
 
@@ -188,7 +189,12 @@ export function TextGeneratorsSettings({
           onClose={() => setEditing(null)}
           onSave={(id, config) =>
             updateSettings(
-              { textGenerators: { [id]: config } },
+              {
+                textGenerators: {
+                  // The form does not know the voice model, and `editing` is stale once it changed.
+                  [id]: { ...config, voiceModel: settings.textGenerators[id]?.voiceModel ?? "" },
+                },
+              },
               { onSaved: () => rereadTextGeneratorModels(environmentId, id) },
             )
           }
@@ -501,6 +507,9 @@ function TextGeneratorWizard({
                   />
                 ))}
               </div>
+              {kind === "openaiCompatible" && savedId !== null ? (
+                <TextGeneratorVoiceModelField environmentId={environmentId} id={savedId} />
+              ) : null}
             </div>
           )}
         </WizardPanel>
