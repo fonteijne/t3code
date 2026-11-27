@@ -388,6 +388,8 @@ export const VOICE_AGENT_TOOL_ERRORS = {
     "That thread has more access than the threads this conversation has been in, so it cannot be opened by voice. Ask the developer to open it in the app and start voice mode there.",
   threadRaised:
     "This thread's access was raised in the app during this conversation, so voice mode cannot act in it. Ask the developer to end voice mode and start it again.",
+  threadAboveManagedLimit:
+    "This thread has more access than the administrator of this environment allows, so no work can start in it. Ask the developer to lower the thread's access in the app.",
   launchFenced:
     "New threads cannot be started by voice from this thread. Ask the developer to start it in the app.",
   noDefaultModel:

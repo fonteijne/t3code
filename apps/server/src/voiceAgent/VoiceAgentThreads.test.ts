@@ -110,12 +110,24 @@ const decodeOutput = Schema.decodeUnknownSync(
   Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
 );
 
-function makeHarness() {
+function makeHarness(maxRuntimeMode?: RuntimeMode) {
   const layerDatabase = SqlitePersistence.layerMemory;
   const layerOrchestrator = ProviderReplayHarness.layerWithRegistry(
     { name: "voice-agent-threads" },
     ProviderAdapterRegistry.layerFromAdapters([adapter]),
-    { databaseLayer: layerDatabase, runEffectWorker: false },
+    {
+      databaseLayer: layerDatabase,
+      runEffectWorker: false,
+      ...(maxRuntimeMode === undefined
+        ? {}
+        : {
+            managedPolicy: {
+              schemaVersion: 1,
+              organization: "Example Corp",
+              limits: { maxRuntimeMode },
+            },
+          }),
+    },
   );
   const layerServerSettings = ServerSettings.layerTest();
   const layerReceipts = CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase));
@@ -839,6 +851,36 @@ it.effect("a thread whose access is raised in the app is not acted on by voice",
       status: "started",
     });
   }).pipe(Effect.provide(makeHarness().layer)),
+);
+
+it.effect("a thread above the administrator's limit is not reported as raised in the app", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    // In full access since before the policy arrived, as an import or an older build leaves it.
+    const older = yield* createThread("older", { runtimeMode: "approval-required" });
+    const { thread } = yield* orchestrator.getThreadRecords(older, []);
+    yield* append("older-full-access", [
+      {
+        type: "thread.runtime-mode-updated",
+        threadId: older,
+        occurredAt: yield* DateTime.now,
+        payload: { ...thread, runtimeMode: "full-access" },
+      },
+    ]);
+    const session = yield* openSession(older, "s1");
+    const refused = yield* session.call("send_to_agent", { message: "Run the migration" });
+    assert.deepEqual(
+      [refused.ok, refused.output],
+      [
+        false,
+        {
+          error:
+            "This thread has more access than the administrator of this environment allows, so no work can start in it. Ask the developer to lower the thread's access in the app.",
+        },
+      ],
+    );
+    assert.equal((yield* projectionOf(older)).messages.length, 0);
+  }).pipe(Effect.provide(makeHarness("approval-required").layer)),
 );
 
 it.effect("what the coding agent wrote cannot leave its fence in a tool result", () =>

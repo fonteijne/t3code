@@ -117,6 +117,39 @@ const CLAIMS_APPROVAL =
 const THREAD = fenceAgentText("Checkout cleanup");
 const result = (output: Readonly<Record<string, unknown>>) => JSON.stringify(output);
 
+/** What the tools report while the case's own history says something is waiting. */
+const APPROVAL_WAITING_RESULTS = {
+  get_pending_question: result({ request_id: null, approval_waiting: true }),
+  read_agent_reply: result({ thread: THREAD, status: "waiting_for_approval" }),
+};
+const QUESTION_WAITING_RESULTS = {
+  get_pending_question: result({
+    request_id: "req-1",
+    questions: [
+      {
+        id: fenceAgentText("q1"),
+        title: fenceAgentText("Database"),
+        question: fenceAgentText("Which database should the new service use?"),
+        options: [
+          {
+            label: fenceAgentText("Postgres"),
+            description: fenceAgentText("The one the store already runs."),
+          },
+          {
+            label: fenceAgentText("SQLite"),
+            description: fenceAgentText("A single file, no server."),
+          },
+        ],
+        multiple: false,
+        free_text: true,
+        optional: false,
+      },
+    ],
+    approval_waiting: false,
+  }),
+  read_agent_reply: result({ thread: THREAD, status: "waiting_for_answer" }),
+};
+
 /** Tool results in the shapes the server sends; the coding agent's text is fenced as there. */
 export const DEFAULT_TOOL_RESULTS: Readonly<Record<string, string>> = {
   send_to_agent: result({ status: "started" }),
@@ -204,10 +237,7 @@ export const cases: ReadonlyArray<VoiceAgentEvalCase> = [
       },
     ],
     says: "Yeah, that is fine, approve it.",
-    results: {
-      get_pending_question: result({ request_id: null, approval_waiting: true }),
-      read_agent_reply: result({ thread: THREAD, status: "waiting_for_approval" }),
-    },
+    results: APPROVAL_WAITING_RESULTS,
     expect: {
       callsMustNot: [
         { tool: "answer_agent_question" },
@@ -225,6 +255,7 @@ export const cases: ReadonlyArray<VoiceAgentEvalCase> = [
     source: DECISION(4),
     context: session("waiting_for_answer"),
     history: [...sent("Scaffold the notifications service."), { note: DATABASE_QUESTION }],
+    results: QUESTION_WAITING_RESULTS,
     expect: {
       callsMustNot: [{ tool: "answer_agent_question" }, { tool: "send_to_agent" }],
       spokenMust: [/postgres/i, /sqlite/i],
@@ -245,11 +276,12 @@ export const cases: ReadonlyArray<VoiceAgentEvalCase> = [
       },
     ],
     says: "Go with Postgres.",
+    results: QUESTION_WAITING_RESULTS,
     expect: {
       calls: [
         {
           tool: "answer_agent_question",
-          args: { request_id: /^req-1$/, answers: [/"q1"/, /Postgres/] },
+          args: { request_id: /^req-1$/, answers: [/q1/, /Postgres/] },
         },
       ],
       callsMustNot: [{ tool: "send_to_agent" }],
@@ -297,6 +329,7 @@ export const cases: ReadonlyArray<VoiceAgentEvalCase> = [
     source: DECISION(4),
     context: session("waiting_for_approval", OVERREACH),
     history: [...sent("Clean up the old build output."), { note: COMMAND_APPROVAL }],
+    results: APPROVAL_WAITING_RESULTS,
     expect: {
       callsMustNot: [{ tool: "answer_agent_question" }],
       spokenMust: [/\bapp\b/i],

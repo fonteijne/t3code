@@ -43,6 +43,7 @@ import * as Stream from "effect/Stream";
 import * as GitManager from "../git/GitManager.ts";
 import {
   DispatchModeLimit,
+  exceededDispatchModeLimit,
   type DispatchModeRefusal,
 } from "../orchestration-v2/DispatchModeLimit.ts";
 import { isProviderSignOutPrompt } from "../orchestration-v2/CommandPolicy.ts";
@@ -698,9 +699,15 @@ const make = Effect.gen(function* () {
               tool,
               errorTag: error._tag,
             });
-            return (yield* Ref.get(raised)) === undefined
-              ? refused(toolFailure(error))
-              : refused(VOICE_AGENT_TOOL_ERRORS.threadRaised);
+            const refusal = yield* Ref.get(raised);
+            if (refusal === undefined) return refused(toolFailure(error));
+            // The orchestrator lowers the limit to the administrator's ceiling first, so a thread
+            // within the session's own ceiling was refused for that one.
+            return refused(
+              ceiling !== null && exceededDispatchModeLimit(ceiling, refusal) !== undefined
+                ? VOICE_AGENT_TOOL_ERRORS.threadRaised
+                : VOICE_AGENT_TOOL_ERRORS.threadAboveManagedLimit,
+            );
           }),
         ),
       );
